@@ -29,7 +29,8 @@ jobs:
           #-Dmicrosoft-clc=enabled -Dstatic-libclc=all -Dspirv-to-dxil=true
         # -D vulkan-drivers=microsoft-experimental
         ninja -k0 -C build/ install
+        cd install && tar cvapf "$GITHUB_WORKSPACE/mesa.tar.xz" *
     - uses: actions/upload-artifact@v2
       with:
         name: binaries
-        path: install/*
+        path: mesa.tar.xz
