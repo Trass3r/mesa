@@ -1,0 +1,31 @@
+name: CI Linux
+
+on:
+  push:
+    branches: main
+  pull_request:
+    branches: main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: ubuntu:devel
+    steps:
+    - uses: actions/checkout@v2
+    - uses: Trass3r/setup-cpp@master
+    - run: |
+        apt update && apt install -y sudo zstd
+        sudo DEBIAN_FRONTEND=noninteractive apt install -y build-essential g++ cmake ninja-build clang lld python3 ccache
+    - name: build
+      run: |
+        #export CFLAGS=-flto CXXFLAGS=-flto LDFLAGS=-flto=auto
+        export CC=clang CXX=clang++
+        export CFLAGS=-flto=thin LDFLAGS=-flto=thin
+        sudo sed -i '/deb-src/s/^# //' /etc/apt/sources.list
+        sudo apt update && sudo apt -y build-dep mesa
+        meson build/ -D platforms=x11,wayland -D gallium-drivers=swrast,zink,d3d12 -D vulkan-drivers=swrast,microsoft-experimental -D dri3=enabled -D egl=enabled -D gles2=enabled -D glvnd=true -D glx=dri -D libunwind=disabled -D shared-glapi=enabled  -D valgrind=disabled -D gles1=disabled -Dgallium-nine=true \
+          -Dmicrosoft-clc=enabled -Dstatic-libclc=all -Dspirv-to-dxiltrue
+    - uses: actions/upload-artifact@v2
+      with:
+        name: binaries
+        path: build/*
