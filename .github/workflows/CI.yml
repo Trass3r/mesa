@@ -22,14 +22,15 @@ jobs:
     - name: build
       run: |
         #export CFLAGS=-flto CXXFLAGS=-flto LDFLAGS=-flto=auto
-        export CC=clang CXX=clang++
+        export CC=clang CXX=clang++ CC_LD=lld
         #export CFLAGS=-flto=thin LDFLAGS='-flto=thin -fuse-ld=lld'
-        export LDFLAGS=-fuse-ld=lld
-        meson build/ -D buildtype=release -Dprefix=`pwd`/install -D platforms=x11,wayland -D gallium-drivers=swrast,zink,d3d12 -D vulkan-drivers=swrast -D dri3=enabled -D egl=enabled -D gles2=enabled -D glvnd=true -D glx=dri -D libunwind=disabled -D shared-glapi=enabled  -D valgrind=disabled -D gles1=disabled -Dgallium-nine=true \
+        #export LDFLAGS=-fuse-ld=lld
+        meson build/ -D buildtype=release -Db_lto=true -Db_lto_mode=thin \
+          -D platforms=x11,wayland -D gallium-drivers=swrast,zink,d3d12 -D vulkan-drivers=swrast -D dri3=enabled -D egl=enabled -D gles2=enabled -D glvnd=true -D glx=dri -D libunwind=disabled -D shared-glapi=enabled  -D valgrind=disabled -D gles1=disabled -Dgallium-nine=true \
           #-Dmicrosoft-clc=enabled -Dstatic-libclc=all -Dspirv-to-dxil=true
         # -D vulkan-drivers=microsoft-experimental
         ninja -k0 -C build/ install
-        cd install && tar cvapf "$GITHUB_WORKSPACE/mesa.tar.xz" *
+        cd /usr/local && tar cvapf "$GITHUB_WORKSPACE/mesa.tar.xz" *
     - uses: actions/upload-artifact@v2
       with:
         name: binaries
