@@ -24,7 +24,7 @@ jobs:
         sudo sed -i '/deb-src/s/^# //' /etc/apt/sources.list
         sudo apt update && sudo apt -y build-dep mesa
         meson build/ -D platforms=x11,wayland -D gallium-drivers=swrast,zink,d3d12 -D vulkan-drivers=swrast,microsoft-experimental -D dri3=enabled -D egl=enabled -D gles2=enabled -D glvnd=true -D glx=dri -D libunwind=disabled -D shared-glapi=enabled  -D valgrind=disabled -D gles1=disabled -Dgallium-nine=true \
-          -Dmicrosoft-clc=enabled -Dstatic-libclc=all -Dspirv-to-dxiltrue
+          -Dmicrosoft-clc=enabled -Dstatic-libclc=all -Dspirv-to-dxil=true
     - uses: actions/upload-artifact@v2
       with:
         name: binaries
