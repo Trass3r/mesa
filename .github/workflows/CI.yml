@@ -22,7 +22,7 @@ jobs:
     - name: build
       run: |
         #export CFLAGS=-flto CXXFLAGS=-flto LDFLAGS=-flto=auto
-        export CC=clang CXX=clang++ CC_LD=lld
+        export CC=clang CXX=clang++ CC_LD=lld CXX_LD=lld
         #export CFLAGS=-flto=thin LDFLAGS='-flto=thin -fuse-ld=lld'
         #export LDFLAGS=-fuse-ld=lld
         meson build/ -D buildtype=release -Db_lto=true -Db_lto_mode=thin \
