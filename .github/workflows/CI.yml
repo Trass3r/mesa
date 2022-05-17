@@ -9,7 +9,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: ubuntu:devel
+    container: ubuntu:rolling
     steps:
     - uses: actions/checkout@v2
     - uses: Trass3r/setup-cpp@master
