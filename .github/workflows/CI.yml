@@ -24,8 +24,9 @@ jobs:
         #export CFLAGS=-flto CXXFLAGS=-flto LDFLAGS=-flto=auto
         export CC=clang CXX=clang++
         export CFLAGS=-flto=thin LDFLAGS=-flto=thin
-        meson build/ -D platforms=x11,wayland -D gallium-drivers=swrast,zink,d3d12 -D vulkan-drivers=swrast,microsoft-experimental -D dri3=enabled -D egl=enabled -D gles2=enabled -D glvnd=true -D glx=dri -D libunwind=disabled -D shared-glapi=enabled  -D valgrind=disabled -D gles1=disabled -Dgallium-nine=true \
+        meson build/ -D platforms=x11,wayland -D gallium-drivers=swrast,zink,d3d12 -D vulkan-drivers=swrast -D dri3=enabled -D egl=enabled -D gles2=enabled -D glvnd=true -D glx=dri -D libunwind=disabled -D shared-glapi=enabled  -D valgrind=disabled -D gles1=disabled -Dgallium-nine=true \
           #-Dmicrosoft-clc=enabled -Dstatic-libclc=all -Dspirv-to-dxil=true
+        # -D vulkan-drivers=microsoft-experimental
         ninja -C build/
         DESTDIR=`pwd`/install ninja -C build/ install
     - uses: actions/upload-artifact@v2
