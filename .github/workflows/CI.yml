@@ -18,13 +18,11 @@ jobs:
         sudo DEBIAN_FRONTEND=noninteractive apt install -y build-essential g++ cmake ninja-build clang lld python3 ccache
         sudo sed -i '/deb-src/s/^# //' /etc/apt/sources.list
         sudo apt update && sudo apt -y build-dep mesa
-        sudo apt install -y libllvmspirvlib-dev mingw-w64-x86-64-dev
+        #sudo apt install -y libllvmspirvlib-dev mingw-w64-x86-64-dev
     - name: build
       run: |
-        #export CFLAGS=-flto CXXFLAGS=-flto LDFLAGS=-flto=auto
         export CC=clang CXX=clang++ CC_LD=lld CXX_LD=lld
-        #export CFLAGS=-flto=thin LDFLAGS='-flto=thin -fuse-ld=lld'
-        #export LDFLAGS=-fuse-ld=lld
+        export CFLAGS=-g1 CXXFLAGS=-g1
         meson build/ -D buildtype=release -Db_lto=true -Db_lto_mode=thin \
           -D platforms=x11,wayland -D gallium-drivers=swrast,zink,d3d12 -D vulkan-drivers=swrast -D dri3=enabled -D egl=enabled -D gles2=enabled -D glvnd=true -D glx=dri -D libunwind=disabled -D shared-glapi=enabled  -D valgrind=disabled -D gles1=disabled -Dgallium-nine=true \
           #-Dmicrosoft-clc=enabled -Dstatic-libclc=all -Dspirv-to-dxil=true
