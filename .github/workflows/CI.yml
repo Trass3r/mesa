@@ -23,7 +23,7 @@ jobs:
       run: |
         export CC=clang CXX=clang++ CC_LD=lld CXX_LD=lld
         #export CFLAGS=-g1 CXXFLAGS=-g1
-        meson build/ -D buildtype=debugoptimized -Db_lto=true -Db_lto_mode=thin \
+        meson build/ -D buildtype=debugoptimized \ # -Db_lto=true -Db_lto_mode=thin \
           -D platforms=x11,wayland -D gallium-drivers=swrast,zink,d3d12 -D vulkan-drivers=swrast -D dri3=enabled -D egl=enabled -D gles2=enabled -D glvnd=true -D glx=dri -D libunwind=disabled -D shared-glapi=enabled  -D valgrind=disabled -D gles1=disabled -Dgallium-nine=true \
           #-Dmicrosoft-clc=enabled -Dstatic-libclc=all -Dspirv-to-dxil=true
         # -D vulkan-drivers=microsoft-experimental
