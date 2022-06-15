@@ -27,7 +27,7 @@ jobs:
         # -D buildtype=release -Db_lto=true -Db_lto_mode=thin
         meson build/ -D buildtype=debugoptimized \
           -D platforms=x11,wayland -D gallium-drivers=swrast,zink,d3d12 -D dri3=enabled -D egl=enabled -D gles2=enabled -D glvnd=true -D glx=dri -D libunwind=disabled -D shared-glapi=enabled  -D valgrind=disabled -D gles1=disabled -Dgallium-nine=true \
-          -D vulkan-drivers=swrast,microsoft-experimental
+          -D vulkan-drivers=swrast # ,microsoft-experimental
           #-Dmicrosoft-clc=enabled -Dstatic-libclc=all -Dspirv-to-dxil=true
         ninja -k0 -C build/
         DESTDIR=`pwd`/install ninja -C build/ install
