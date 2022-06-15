@@ -21,6 +21,8 @@ jobs:
     - uses: hendrikmuhs/ccache-action@v1.2
     - uses: Trass3r/setup-cpp@master
     - name: build
+      env:
+        CCACHE_NOCOMPRESS: 1 # cache action will also compress
       run: |
         export CC='ccache clang' CXX='ccache clang++' CC_LD=lld CXX_LD=lld
         export CFLAGS='-g -gdwarf-4' CXXFLAGS='-g -gdwarf-4'
@@ -32,7 +34,7 @@ jobs:
         ninja -k0 -C build/
         DESTDIR=`pwd`/install ninja -C build/ install
         cd install/usr/local && tar cvapf "$GITHUB_WORKSPACE/mesa.tar.xz" *
-    - uses: actions/upload-artifact@v2
+    - uses: actions/upload-artifact@v3
       with:
         name: binaries
         path: mesa.tar.xz
