@@ -12,22 +12,23 @@ jobs:
     container: ubuntu:rolling
     steps:
     - uses: actions/checkout@v2
-    - uses: Trass3r/setup-cpp@master
     - run: |
         apt update && apt install -y sudo zstd
         sudo DEBIAN_FRONTEND=noninteractive apt install -y git build-essential g++ cmake ninja-build clang lld python3 ccache
         sudo sed -i '/deb-src/s/^# //' /etc/apt/sources.list
         sudo apt update && sudo apt -y build-dep mesa
         #sudo apt install -y libllvmspirvlib-dev mingw-w64-x86-64-dev
+    - uses: hendrikmuhs/ccache-action@v1.2
+    - uses: Trass3r/setup-cpp@master
     - name: build
       run: |
-        export CC=clang CXX=clang++ CC_LD=lld CXX_LD=lld
+        export CC='ccache clang' CXX='ccache clang++' CC_LD=lld CXX_LD=lld
         export CFLAGS='-g -gdwarf-4' CXXFLAGS='-g -gdwarf-4'
         # -D buildtype=release -Db_lto=true -Db_lto_mode=thin
         meson build/ -D buildtype=debugoptimized \
-          -D platforms=x11,wayland -D gallium-drivers=swrast,zink,d3d12 -D vulkan-drivers=swrast -D dri3=enabled -D egl=enabled -D gles2=enabled -D glvnd=true -D glx=dri -D libunwind=disabled -D shared-glapi=enabled  -D valgrind=disabled -D gles1=disabled -Dgallium-nine=true \
+          -D platforms=x11,wayland -D gallium-drivers=swrast,zink,d3d12 -D dri3=enabled -D egl=enabled -D gles2=enabled -D glvnd=true -D glx=dri -D libunwind=disabled -D shared-glapi=enabled  -D valgrind=disabled -D gles1=disabled -Dgallium-nine=true \
+          -D vulkan-drivers=swrast,microsoft-experimental
           #-Dmicrosoft-clc=enabled -Dstatic-libclc=all -Dspirv-to-dxil=true
-        # -D vulkan-drivers=microsoft-experimental
         ninja -k0 -C build/
         DESTDIR=`pwd`/install ninja -C build/ install
         cd install/usr/local && tar cvapf "$GITHUB_WORKSPACE/mesa.tar.xz" *
