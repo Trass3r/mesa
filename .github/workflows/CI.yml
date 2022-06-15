@@ -15,7 +15,7 @@ jobs:
     - uses: Trass3r/setup-cpp@master
     - run: |
         apt update && apt install -y sudo zstd
-        sudo DEBIAN_FRONTEND=noninteractive apt install -y build-essential g++ cmake ninja-build clang lld python3 ccache
+        sudo DEBIAN_FRONTEND=noninteractive apt install -y git build-essential g++ cmake ninja-build clang lld python3 ccache
         sudo sed -i '/deb-src/s/^# //' /etc/apt/sources.list
         sudo apt update && sudo apt -y build-dep mesa
         #sudo apt install -y libllvmspirvlib-dev mingw-w64-x86-64-dev
