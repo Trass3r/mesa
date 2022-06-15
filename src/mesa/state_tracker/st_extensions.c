@@ -156,16 +156,16 @@ void st_init_limits(struct pipe_screen *screen,
                         PIPE_CAP_QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION);
 
    c->MaxUniformBlockSize =
-      screen->get_shader_param(screen, PIPE_SHADER_FRAGMENT,
-                               PIPE_SHADER_CAP_MAX_CONST_BUFFER_SIZE);
-   /* GL45-CTS.enhanced_layouts.ssb_member_invalid_offset_alignment fails if
-    * this is larger than INT_MAX - 100. Use a nicely aligned limit.
-    */
-   c->MaxUniformBlockSize = MIN2(c->MaxUniformBlockSize, INT_MAX - 127);
+      screen->get_param(screen, PIPE_CAP_MAX_CONSTANT_BUFFER_SIZE_UINT);
 
    if (c->MaxUniformBlockSize < 16384) {
       can_ubo = false;
    }
+
+   /* Round down to a multiple of 4 to make piglit happy. Bytes are not
+    * addressible by UBOs anyway.
+    */
+   c->MaxUniformBlockSize &= ~3;
 
    for (sh = 0; sh < PIPE_SHADER_TYPES; ++sh) {
       const gl_shader_stage stage = tgsi_processor_to_shader_stage(sh);
@@ -224,7 +224,7 @@ void st_init_limits(struct pipe_screen *screen,
 
       pc->MaxUniformComponents =
          screen->get_shader_param(screen, sh,
-                                  PIPE_SHADER_CAP_MAX_CONST_BUFFER_SIZE) / 4;
+                                  PIPE_SHADER_CAP_MAX_CONST_BUFFER0_SIZE) / 4;
 
       /* reserve space in the default-uniform for lowered state */
       if (sh == PIPE_SHADER_VERTEX ||
@@ -350,10 +350,6 @@ void st_init_limits(struct pipe_screen *screen,
           (options->EmitNoIndirectUniform || pc->MaxUniformBlocks < 12)) {
          can_ubo = false;
       }
-
-      options->MaxUnrollIterations =
-         screen->get_shader_param(screen, sh,
-                              PIPE_SHADER_CAP_MAX_UNROLL_ITERATIONS_HINT);
 
       if (!screen->get_param(screen, PIPE_CAP_NIR_COMPACT_ARRAYS))
          options->LowerCombinedClipCullDistance = true;
@@ -551,7 +547,7 @@ void st_init_limits(struct pipe_screen *screen,
       c->MaxCombinedShaderOutputResources +=
          c->MaxCombinedShaderStorageBlocks;
       c->MaxShaderStorageBlockSize =
-         screen->get_param(screen, PIPE_CAP_MAX_SHADER_BUFFER_SIZE);
+         screen->get_param(screen, PIPE_CAP_MAX_SHADER_BUFFER_SIZE_UINT);
       if (c->Program[MESA_SHADER_FRAGMENT].MaxShaderStorageBlocks)
          extensions->ARB_shader_storage_buffer_object = GL_TRUE;
    }
@@ -630,6 +626,9 @@ void st_init_limits(struct pipe_screen *screen,
       screen->get_param(screen, PIPE_CAP_MAX_SPARSE_ARRAY_TEXTURE_LAYERS);
    c->SparseTextureFullArrayCubeMipmaps =
       screen->get_param(screen, PIPE_CAP_SPARSE_TEXTURE_FULL_ARRAY_CUBE_MIPMAPS);
+
+   c->HardwareAcceleratedSelect =
+      screen->get_param(screen, PIPE_CAP_HARDWARE_GL_SELECT);
 }
 
 
@@ -1462,8 +1461,7 @@ void st_init_extensions(struct pipe_screen *screen,
 
    if (extensions->ARB_texture_buffer_object) {
       consts->MaxTextureBufferSize =
-         _min(screen->get_param(screen, PIPE_CAP_MAX_TEXTURE_BUFFER_SIZE),
-              (1u << 31) - 1);
+         screen->get_param(screen, PIPE_CAP_MAX_TEXEL_BUFFER_ELEMENTS_UINT);
       consts->TextureBufferOffsetAlignment =
          screen->get_param(screen, PIPE_CAP_TEXTURE_BUFFER_OFFSET_ALIGNMENT);
 
@@ -1626,7 +1624,8 @@ void st_init_extensions(struct pipe_screen *screen,
          consts->MaxComputeSharedMemorySize = max_local_size;
 
          for (i = 0; i < 3; i++) {
-            consts->MaxComputeWorkGroupCount[i] = grid_size[i];
+            /* There are tests that fail if we report more that INT_MAX - 1. */
+            consts->MaxComputeWorkGroupCount[i] = MIN2(grid_size[i], INT_MAX - 1);
             consts->MaxComputeWorkGroupSize[i] = block_size[i];
          }
 

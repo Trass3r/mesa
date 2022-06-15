@@ -182,7 +182,7 @@ dzn_cmd_buffer_create(const VkCommandBufferAllocateInfo *info,
 
    if (FAILED(ID3D12Device1_CreateCommandAllocator(device->dev, type,
                                                    &IID_ID3D12CommandAllocator,
-                                                   &cmdbuf->cmdalloc))) {
+                                                   (void **)&cmdbuf->cmdalloc))) {
       result = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
       goto out;
    }
@@ -190,7 +190,7 @@ dzn_cmd_buffer_create(const VkCommandBufferAllocateInfo *info,
    if (FAILED(ID3D12Device1_CreateCommandList(device->dev, 0, type,
                                               cmdbuf->cmdalloc, NULL,
                                               &IID_ID3D12GraphicsCommandList1,
-                                              &cmdbuf->cmdlist))) {
+                                              (void **)&cmdbuf->cmdlist))) {
       result = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
       goto out;
    }
@@ -231,6 +231,7 @@ dzn_cmd_buffer_reset(struct dzn_cmd_buffer *cmdbuf)
    hash_table_foreach(cmdbuf->rtvs.ht, he)
       vk_free(&cmdbuf->vk.pool->alloc, he->data);
    _mesa_hash_table_clear(cmdbuf->rtvs.ht, NULL);
+   cmdbuf->null_rtv.ptr = 0;
    dzn_descriptor_heap_pool_reset(&cmdbuf->rtvs.pool);
    hash_table_foreach(cmdbuf->dsvs.ht, he)
       vk_free(&cmdbuf->vk.pool->alloc, he->data);
@@ -264,7 +265,7 @@ dzn_cmd_buffer_reset(struct dzn_cmd_buffer *cmdbuf)
                                               type,
                                               cmdbuf->cmdalloc, NULL,
                                               &IID_ID3D12GraphicsCommandList1,
-                                              &cmdbuf->cmdlist))) {
+                                              (void **)&cmdbuf->cmdlist))) {
       cmdbuf->error = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
    }
 
@@ -828,6 +829,29 @@ dzn_cmd_buffer_get_rtv(struct dzn_cmd_buffer *cmdbuf,
    return rtve->handle;
 }
 
+static D3D12_CPU_DESCRIPTOR_HANDLE
+dzn_cmd_buffer_get_null_rtv(struct dzn_cmd_buffer *cmdbuf)
+{
+   struct dzn_device *device = container_of(cmdbuf->vk.base.device, struct dzn_device, vk);
+
+   if (!cmdbuf->null_rtv.ptr) {
+      struct dzn_descriptor_heap *heap;
+      uint32_t slot;
+      dzn_descriptor_heap_pool_alloc_slots(&cmdbuf->rtvs.pool, device, 1, &heap, &slot);
+      cmdbuf->null_rtv = dzn_descriptor_heap_get_cpu_handle(heap, slot);
+
+      D3D12_RENDER_TARGET_VIEW_DESC desc = { 0 };
+      desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+      desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+      desc.Texture2D.MipSlice = 0;
+      desc.Texture2D.PlaneSlice = 0;
+
+      ID3D12Device1_CreateRenderTargetView(device->dev, NULL, &desc, cmdbuf->null_rtv);
+   }
+
+   return cmdbuf->null_rtv;
+}
+
 static VkResult
 dzn_cmd_buffer_alloc_internal_buf(struct dzn_cmd_buffer *cmdbuf,
                                   uint32_t size,
@@ -862,7 +886,7 @@ dzn_cmd_buffer_alloc_internal_buf(struct dzn_cmd_buffer *cmdbuf,
                                             D3D12_HEAP_FLAG_NONE, &rdesc,
                                             init_state, NULL,
                                             &IID_ID3D12Resource,
-                                            &res);
+                                            (void **)&res);
    if (FAILED(hres)) {
       cmdbuf->error = vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return cmdbuf->error;
@@ -928,7 +952,7 @@ dzn_cmd_buffer_clear_rects_with_copy(struct dzn_cmd_buffer *cmdbuf,
    assert(!(res_size % fill_step));
 
    uint8_t *cpu_ptr;
-   ID3D12Resource_Map(src_res, 0, NULL, &cpu_ptr);
+   ID3D12Resource_Map(src_res, 0, NULL, (void **)&cpu_ptr);
    for (uint32_t i = 0; i < res_size; i += fill_step)
       memcpy(&cpu_ptr[i], buf, fill_step);
 
@@ -1084,7 +1108,7 @@ dzn_cmd_buffer_clear_ranges_with_copy(struct dzn_cmd_buffer *cmdbuf,
    assert(!(res_size % fill_step));
 
    uint8_t *cpu_ptr;
-   ID3D12Resource_Map(src_res, 0, NULL, &cpu_ptr);
+   ID3D12Resource_Map(src_res, 0, NULL, (void **)&cpu_ptr);
    for (uint32_t i = 0; i < res_size; i += fill_step)
       memcpy(&cpu_ptr[i], buf, fill_step);
 
@@ -1436,7 +1460,7 @@ dzn_cmd_buffer_copy_buf2img_region(struct dzn_cmd_buffer *cmdbuf,
    VK_FROM_HANDLE(dzn_buffer, src_buffer, info->srcBuffer);
    VK_FROM_HANDLE(dzn_image, dst_image, info->dstImage);
 
-   ID3D12Device1 *dev = device->dev;
+   ID3D12Device2 *dev = device->dev;
    ID3D12GraphicsCommandList1 *cmdlist = cmdbuf->cmdlist;
 
    const VkBufferImageCopy2 *region = &info->pRegions[r];
@@ -1511,7 +1535,7 @@ dzn_cmd_buffer_copy_img2buf_region(struct dzn_cmd_buffer *cmdbuf,
    VK_FROM_HANDLE(dzn_image, src_image, info->srcImage);
    VK_FROM_HANDLE(dzn_buffer, dst_buffer, info->dstBuffer);
 
-   ID3D12Device1 *dev = device->dev;
+   ID3D12Device2 *dev = device->dev;
    ID3D12GraphicsCommandList1 *cmdlist = cmdbuf->cmdlist;
 
    const VkBufferImageCopy2 *region = &info->pRegions[r];
@@ -1586,7 +1610,7 @@ dzn_cmd_buffer_copy_img_chunk(struct dzn_cmd_buffer *cmdbuf,
    VK_FROM_HANDLE(dzn_image, src, info->srcImage);
    VK_FROM_HANDLE(dzn_image, dst, info->dstImage);
 
-   ID3D12Device1 *dev = device->dev;
+   ID3D12Device2 *dev = device->dev;
    ID3D12GraphicsCommandList1 *cmdlist = cmdbuf->cmdlist;
 
    const VkImageCopy2 *region = &info->pRegions[r];
@@ -2046,7 +2070,7 @@ dzn_cmd_buffer_resolve_region(struct dzn_cmd_buffer *cmdbuf,
    VK_FROM_HANDLE(dzn_image, src, info->srcImage);
    VK_FROM_HANDLE(dzn_image, dst, info->dstImage);
 
-   ID3D12Device1 *dev = device->dev;
+   ID3D12Device2 *dev = device->dev;
    const VkImageResolve2 *region = &info->pRegions[r];
 
    dzn_foreach_aspect(aspect, region->srcSubresource.aspectMask) {
@@ -2111,18 +2135,24 @@ dzn_cmd_buffer_update_pipeline(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint
    if (!pipeline)
       return;
 
+   ID3D12PipelineState *old_pipeline_state =
+      cmdbuf->state.pipeline ? cmdbuf->state.pipeline->state : NULL;
+
    if (cmdbuf->state.bindpoint[bindpoint].dirty & DZN_CMD_BINDPOINT_DIRTY_PIPELINE) {
       if (bindpoint == VK_PIPELINE_BIND_POINT_GRAPHICS) {
-         const struct dzn_graphics_pipeline *gfx =
-            (const struct dzn_graphics_pipeline *)pipeline;
+         struct dzn_graphics_pipeline *gfx =
+            (struct dzn_graphics_pipeline *)pipeline;
          ID3D12GraphicsCommandList1_SetGraphicsRootSignature(cmdbuf->cmdlist, pipeline->root.sig);
          ID3D12GraphicsCommandList1_IASetPrimitiveTopology(cmdbuf->cmdlist, gfx->ia.topology);
+         dzn_graphics_pipeline_get_state(gfx, &cmdbuf->state.pipeline_variant);
       } else {
          ID3D12GraphicsCommandList1_SetComputeRootSignature(cmdbuf->cmdlist, pipeline->root.sig);
       }
    }
 
-   if (cmdbuf->state.pipeline != pipeline) {
+   ID3D12PipelineState *new_pipeline_state = pipeline->state;
+
+   if (old_pipeline_state != new_pipeline_state) {
       ID3D12GraphicsCommandList1_SetPipelineState(cmdbuf->cmdlist, pipeline->state);
       cmdbuf->state.pipeline = pipeline;
    }
@@ -2365,6 +2395,16 @@ dzn_cmd_buffer_update_blend_constants(struct dzn_cmd_buffer *cmdbuf)
                                                   cmdbuf->state.blend.constants);
 }
 
+static void
+dzn_cmd_buffer_update_depth_bounds(struct dzn_cmd_buffer *cmdbuf)
+{
+   if (cmdbuf->state.dirty & DZN_CMD_DIRTY_DEPTH_BOUNDS) {
+      ID3D12GraphicsCommandList1_OMSetDepthBounds(cmdbuf->cmdlist,
+                                                  cmdbuf->state.zsa.depth_bounds.min,
+                                                  cmdbuf->state.zsa.depth_bounds.max);
+   }
+}
+
 static VkResult
 dzn_cmd_buffer_triangle_fan_create_index(struct dzn_cmd_buffer *cmdbuf, uint32_t *vertex_count)
 {
@@ -2439,8 +2479,15 @@ dzn_cmd_buffer_triangle_fan_rewrite_index(struct dzn_cmd_buffer *cmdbuf,
    D3D12_GPU_VIRTUAL_ADDRESS old_index_buf_gpu =
       cmdbuf->state.ib.view.BufferLocation;
 
+   ASSERTED const struct dzn_graphics_pipeline *gfx_pipeline = (const struct dzn_graphics_pipeline *)
+      cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].pipeline;
+   ASSERTED bool prim_restart =
+      dzn_graphics_pipeline_get_desc_template(gfx_pipeline, ib_strip_cut) != NULL;
+
+   assert(!prim_restart);
+
    enum dzn_index_type index_type =
-      dzn_index_type_from_dxgi_format(cmdbuf->state.ib.view.Format);
+      dzn_index_type_from_dxgi_format(cmdbuf->state.ib.view.Format, false);
    const struct dzn_meta_triangle_fan_rewrite_index *rewrite_index =
       &device->triangle_fan[index_type];
 
@@ -2498,6 +2545,9 @@ dzn_cmd_buffer_triangle_fan_rewrite_index(struct dzn_cmd_buffer *cmdbuf,
 static void
 dzn_cmd_buffer_prepare_draw(struct dzn_cmd_buffer *cmdbuf, bool indexed)
 {
+   if (indexed)
+      dzn_cmd_buffer_update_ibview(cmdbuf);
+
    dzn_cmd_buffer_update_pipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS);
    dzn_cmd_buffer_update_heaps(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS);
    dzn_cmd_buffer_update_sysvals(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS);
@@ -2507,9 +2557,7 @@ dzn_cmd_buffer_prepare_draw(struct dzn_cmd_buffer *cmdbuf, bool indexed)
    dzn_cmd_buffer_update_push_constants(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS);
    dzn_cmd_buffer_update_zsa(cmdbuf);
    dzn_cmd_buffer_update_blend_constants(cmdbuf);
-
-   if (indexed)
-      dzn_cmd_buffer_update_ibview(cmdbuf);
+   dzn_cmd_buffer_update_depth_bounds(cmdbuf);
 
    /* Reset the dirty states */
    cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].dirty = 0;
@@ -2548,9 +2596,9 @@ dzn_cmd_buffer_triangle_fan_get_max_index_buf_size(struct dzn_cmd_buffer *cmdbuf
 
 static void
 dzn_cmd_buffer_indirect_draw(struct dzn_cmd_buffer *cmdbuf,
-                             struct dzn_buffer *draw_buf,
+                             ID3D12Resource *draw_buf,
                              size_t draw_buf_offset,
-                             struct dzn_buffer *count_buf,
+                             ID3D12Resource *count_buf,
                              size_t count_buf_offset,
                              uint32_t max_draw_count,
                              uint32_t draw_buf_stride,
@@ -2564,6 +2612,8 @@ dzn_cmd_buffer_indirect_draw(struct dzn_cmd_buffer *cmdbuf,
       indexed ?
       sizeof(struct dzn_indirect_indexed_draw_params) :
       sizeof(struct dzn_indirect_draw_params);
+   bool prim_restart =
+      dzn_graphics_pipeline_get_desc_template(pipeline, ib_strip_cut) != NULL;
 
    draw_buf_stride = draw_buf_stride ? draw_buf_stride : min_draw_buf_stride;
    assert(draw_buf_stride >= min_draw_buf_stride);
@@ -2599,7 +2649,7 @@ dzn_cmd_buffer_indirect_draw(struct dzn_cmd_buffer *cmdbuf,
       return;
 
    D3D12_GPU_VIRTUAL_ADDRESS draw_buf_gpu =
-      ID3D12Resource_GetGPUVirtualAddress(draw_buf->res) + draw_buf_offset;
+      ID3D12Resource_GetGPUVirtualAddress(draw_buf) + draw_buf_offset;
    ID3D12Resource *triangle_fan_index_buf = NULL;
    ID3D12Resource *triangle_fan_exec_buf = NULL;
 
@@ -2623,24 +2673,35 @@ dzn_cmd_buffer_indirect_draw(struct dzn_cmd_buffer *cmdbuf,
          return;
    }
 
-   struct dzn_indirect_draw_triangle_fan_rewrite_params params = {
+   struct dzn_indirect_draw_triangle_fan_prim_restart_rewrite_params params = {
       .draw_buf_stride = draw_buf_stride,
       .triangle_fan_index_buf_stride = triangle_fan_index_buf_stride,
       .triangle_fan_index_buf_start =
          triangle_fan_index_buf ?
          ID3D12Resource_GetGPUVirtualAddress(triangle_fan_index_buf) : 0,
+      .exec_buf_start =
+         prim_restart ?
+         ID3D12Resource_GetGPUVirtualAddress(exec_buf) + exec_buf_draw_offset : 0,
    };
-   uint32_t params_size =
-      triangle_fan_index_buf_stride > 0 ?
-      sizeof(struct dzn_indirect_draw_triangle_fan_rewrite_params) :
-      sizeof(struct dzn_indirect_draw_rewrite_params);
+   uint32_t params_size;
+   if (triangle_fan_index_buf_stride > 0 && prim_restart)
+      params_size = sizeof(struct dzn_indirect_draw_triangle_fan_prim_restart_rewrite_params);
+   else if (triangle_fan_index_buf_stride > 0)
+      params_size = sizeof(struct dzn_indirect_draw_triangle_fan_rewrite_params);
+   else
+      params_size = sizeof(struct dzn_indirect_draw_rewrite_params);
 
    enum dzn_indirect_draw_type draw_type;
 
    if (indexed && triangle_fan_index_buf_stride > 0) {
-      draw_type = count_buf ?
-                  DZN_INDIRECT_INDEXED_DRAW_COUNT_TRIANGLE_FAN :
-                  DZN_INDIRECT_INDEXED_DRAW_TRIANGLE_FAN;
+      if (prim_restart && count_buf)
+         draw_type =  DZN_INDIRECT_INDEXED_DRAW_COUNT_TRIANGLE_FAN_PRIM_RESTART;
+      else if (prim_restart && !count_buf)
+         draw_type =  DZN_INDIRECT_INDEXED_DRAW_TRIANGLE_FAN_PRIM_RESTART;
+      else if (!prim_restart && count_buf)
+         draw_type = DZN_INDIRECT_INDEXED_DRAW_COUNT_TRIANGLE_FAN;
+      else
+         draw_type = DZN_INDIRECT_INDEXED_DRAW_TRIANGLE_FAN;
    } else if (!indexed && triangle_fan_index_buf_stride > 0) {
       draw_type = count_buf ?
                   DZN_INDIRECT_DRAW_COUNT_TRIANGLE_FAN :
@@ -2670,7 +2731,7 @@ dzn_cmd_buffer_indirect_draw(struct dzn_cmd_buffer *cmdbuf,
    if (count_buf) {
       ID3D12GraphicsCommandList1_SetComputeRootShaderResourceView(cmdbuf->cmdlist,
                                                                   root_param_idx++,
-                                                                  ID3D12Resource_GetGPUVirtualAddress(count_buf->res) +
+                                                                  ID3D12Resource_GetGPUVirtualAddress(count_buf) +
                                                                   count_buf_offset);
    }
 
@@ -2711,16 +2772,12 @@ dzn_cmd_buffer_indirect_draw(struct dzn_cmd_buffer *cmdbuf,
       },
    };
 
-   uint32_t post_barrier_count = triangle_fan_exec_buf ? 2 : 1;
-
-   ID3D12GraphicsCommandList1_ResourceBarrier(cmdbuf->cmdlist, post_barrier_count, post_barriers);
-
    D3D12_INDEX_BUFFER_VIEW ib_view = { 0 };
 
    if (triangle_fan_exec_buf) {
       enum dzn_index_type index_type =
          indexed ?
-         dzn_index_type_from_dxgi_format(cmdbuf->state.ib.view.Format) :
+         dzn_index_type_from_dxgi_format(cmdbuf->state.ib.view.Format, prim_restart) :
          DZN_NO_INDEX;
       struct dzn_meta_triangle_fan_rewrite_index *rewrite_index =
          &device->triangle_fan[index_type];
@@ -2730,6 +2787,22 @@ dzn_cmd_buffer_indirect_draw(struct dzn_cmd_buffer *cmdbuf,
       assert(rewrite_index->root_sig);
       assert(rewrite_index->pipeline_state);
       assert(rewrite_index->cmd_sig);
+
+      D3D12_RESOURCE_BARRIER triangle_fan_exec_buf_barrier = {
+         .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+         .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+          /* Transition the exec buffer to indirect arg so it can be
+           * pass to ExecuteIndirect() as an argument buffer.
+           */
+         .Transition = {
+            .pResource = triangle_fan_exec_buf,
+            .Subresource = 0,
+            .StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            .StateAfter = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+         },
+      };
+
+      ID3D12GraphicsCommandList1_ResourceBarrier(cmdbuf->cmdlist, 1, &triangle_fan_exec_buf_barrier);
 
       ID3D12GraphicsCommandList1_SetComputeRootSignature(cmdbuf->cmdlist, rewrite_index->root_sig);
       ID3D12GraphicsCommandList1_SetPipelineState(cmdbuf->cmdlist, rewrite_index->pipeline_state);
@@ -2773,6 +2846,22 @@ dzn_cmd_buffer_indirect_draw(struct dzn_cmd_buffer *cmdbuf,
       cmdbuf->state.ib.view.Format = DXGI_FORMAT_R32_UINT;
       cmdbuf->state.dirty |= DZN_CMD_DIRTY_IB;
    }
+
+   D3D12_RESOURCE_BARRIER exec_buf_barrier = {
+      .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+      .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+       /* Transition the exec buffer to indirect arg so it can be
+        * pass to ExecuteIndirect() as an argument buffer.
+        */
+      .Transition = {
+         .pResource = exec_buf,
+         .Subresource = 0,
+         .StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+         .StateAfter = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+      },
+   };
+
+   ID3D12GraphicsCommandList1_ResourceBarrier(cmdbuf->cmdlist, 1, &exec_buf_barrier);
 
    /* We don't mess up with the driver state when executing our internal
     * compute shader, but we still change the D3D12 state, so let's mark
@@ -2969,7 +3058,7 @@ dzn_CmdCopyImage2(VkCommandBuffer commandBuffer,
    };
 
    if (requires_temp_res) {
-      ID3D12Device1 *dev = device->dev;
+      ID3D12Device2 *dev = device->dev;
       VkImageAspectFlags aspect = 0;
       uint64_t max_size = 0;
 
@@ -3179,7 +3268,7 @@ dzn_CmdFillBuffer(VkCommandBuffer commandBuffer,
       return;
 
    uint32_t *cpu_ptr;
-   ID3D12Resource_Map(src_res, 0, NULL, &cpu_ptr);
+   ID3D12Resource_Map(src_res, 0, NULL, (void **)&cpu_ptr);
    for (uint32_t i = 0; i < size / 4; i++)
       cpu_ptr[i] = data;
 
@@ -3249,7 +3338,7 @@ dzn_CmdClearAttachments(VkCommandBuffer commandBuffer,
 
          if (cmdbuf->state.render.attachments.stencil.iview &&
              (pAttachments[i].aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT)) {
-            assert(view || view == cmdbuf->state.render.attachments.depth.iview);
+            assert(!view || view == cmdbuf->state.render.attachments.depth.iview);
             view = cmdbuf->state.render.attachments.stencil.iview;
          }
       }
@@ -3355,6 +3444,50 @@ dzn_cmd_buffer_resolve_rendering_attachment(struct dzn_cmd_buffer *cmdbuf,
    }
 }
 
+static void
+dzn_rendering_attachment_initial_transition(struct dzn_cmd_buffer *cmdbuf,
+                                            const VkRenderingAttachmentInfo *att,
+                                            VkImageAspectFlagBits aspect)
+{
+   const VkRenderingAttachmentInitialLayoutInfoMESA *initial_layout =
+      vk_find_struct_const(att->pNext, RENDERING_ATTACHMENT_INITIAL_LAYOUT_INFO_MESA);
+   VK_FROM_HANDLE(dzn_image_view, iview, att->imageView);
+
+   if (!initial_layout || !iview)
+      return;
+
+   struct dzn_image *image = container_of(iview->vk.image, struct dzn_image, vk);
+
+   D3D12_RESOURCE_BARRIER transition_barrier = {
+      .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+      .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+      .Transition = {
+         .pResource = image->res,
+         .StateBefore = dzn_image_layout_to_state(initial_layout->initialLayout, aspect),
+         .StateAfter = dzn_image_layout_to_state(att->imageLayout, aspect),
+      },
+   };
+
+   if (transition_barrier.Transition.StateBefore == transition_barrier.Transition.StateAfter)
+      return;
+
+   const VkImageSubresourceRange range = {
+      .aspectMask = aspect,
+      .baseMipLevel = iview->vk.base_mip_level,
+      .levelCount = iview->vk.level_count,
+      .baseArrayLayer = iview->vk.base_array_layer,
+      .layerCount = iview->vk.layer_count,
+   };
+
+   for (uint32_t layer = 0; layer < iview->vk.layer_count; layer++) {
+      for (uint32_t lvl = 0; lvl < iview->vk.level_count; lvl++) {
+         transition_barrier.Transition.Subresource =
+            dzn_image_range_get_subresource_index(image, &range, aspect, lvl, layer);
+         ID3D12GraphicsCommandList1_ResourceBarrier(cmdbuf->cmdlist, 1, &transition_barrier);
+      }
+   }
+}
+
 VKAPI_ATTR void VKAPI_CALL
 dzn_CmdBeginRendering(VkCommandBuffer commandBuffer,
                       const VkRenderingInfo *pRenderingInfo)
@@ -3395,11 +3528,15 @@ dzn_CmdBeginRendering(VkCommandBuffer commandBuffer,
          att->resolveImageLayout;
       cmdbuf->state.render.attachments.colors[i].store_op = att->storeOp;
 
-      if (!iview)
+      if (!iview) {
+         rt_handles[i] = dzn_cmd_buffer_get_null_rtv(cmdbuf);
          continue;
+      }
 
       struct dzn_image *img = container_of(iview->vk.image, struct dzn_image, vk);
       rt_handles[i] = dzn_cmd_buffer_get_rtv(cmdbuf, img, &iview->rtv_desc);
+      dzn_rendering_attachment_initial_transition(cmdbuf, att,
+                                                  VK_IMAGE_ASPECT_COLOR_BIT);
    }
 
    if (pRenderingInfo->pDepthAttachment) {
@@ -3414,6 +3551,8 @@ dzn_CmdBeginRendering(VkCommandBuffer commandBuffer,
       cmdbuf->state.render.attachments.depth.resolve.layout =
          att->resolveImageLayout;
       cmdbuf->state.render.attachments.depth.store_op = att->storeOp;
+      dzn_rendering_attachment_initial_transition(cmdbuf, att,
+                                                  VK_IMAGE_ASPECT_DEPTH_BIT);
    }
 
    if (pRenderingInfo->pStencilAttachment) {
@@ -3428,6 +3567,8 @@ dzn_CmdBeginRendering(VkCommandBuffer commandBuffer,
       cmdbuf->state.render.attachments.stencil.resolve.layout =
          att->resolveImageLayout;
       cmdbuf->state.render.attachments.stencil.store_op = att->storeOp;
+      dzn_rendering_attachment_initial_transition(cmdbuf, att,
+                                                  VK_IMAGE_ASPECT_STENCIL_BIT);
    }
 
    if (pRenderingInfo->pDepthAttachment || pRenderingInfo->pStencilAttachment) {
@@ -3545,6 +3686,12 @@ dzn_CmdBindPipeline(VkCommandBuffer commandBuffer,
          cmdbuf->state.zsa.stencil_test.front.ref = gfx->zsa.stencil_test.front.ref;
          cmdbuf->state.zsa.stencil_test.back.ref = gfx->zsa.stencil_test.back.ref;
          cmdbuf->state.dirty |= DZN_CMD_DIRTY_STENCIL_REF;
+      }
+
+      if (gfx->zsa.depth_bounds.enable && !gfx->zsa.depth_bounds.dynamic) {
+         cmdbuf->state.zsa.depth_bounds.min = gfx->zsa.depth_bounds.min;
+         cmdbuf->state.zsa.depth_bounds.max = gfx->zsa.depth_bounds.max;
+         cmdbuf->state.dirty |= DZN_CMD_DIRTY_DEPTH_BOUNDS;
       }
 
       if (!gfx->blend.dynamic_constants) {
@@ -3737,6 +3884,42 @@ dzn_CmdDrawIndexed(VkCommandBuffer commandBuffer,
    const struct dzn_graphics_pipeline *pipeline = (const struct dzn_graphics_pipeline *)
       cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].pipeline;
 
+   if (pipeline->ia.triangle_fan &&
+       dzn_graphics_pipeline_get_desc_template(pipeline, ib_strip_cut)) {
+      /* The indexed+primitive-restart+triangle-fan combination is a mess,
+       * since we have to walk the index buffer, skip entries with the
+       * special 0xffff/0xffffffff values, and push triangle list indices
+       * for the remaining values. All of this has an impact on the index
+       * count passed to the draw call, which forces us to use the indirect
+       * path.
+       */
+      struct dzn_indirect_indexed_draw_params params = {
+         .index_count = indexCount,
+         .instance_count = instanceCount,
+         .first_index = firstIndex,
+         .vertex_offset = vertexOffset,
+         .first_instance = firstInstance,
+      };
+
+      ID3D12Resource *draw_buf;
+      VkResult result =
+         dzn_cmd_buffer_alloc_internal_buf(cmdbuf, sizeof(params),
+                                           D3D12_HEAP_TYPE_UPLOAD,
+                                           D3D12_RESOURCE_STATE_GENERIC_READ,
+                                           &draw_buf);
+      if (result != VK_SUCCESS)
+         return;
+
+      void *cpu_ptr;
+      ID3D12Resource_Map(draw_buf, 0, NULL, &cpu_ptr);
+      memcpy(cpu_ptr, &params, sizeof(params));
+
+      ID3D12Resource_Unmap(draw_buf, 0, NULL);
+
+      dzn_cmd_buffer_indirect_draw(cmdbuf, draw_buf, 0, NULL, 0, 1, sizeof(params), true);
+      return;
+   }
+
    cmdbuf->state.sysvals.gfx.first_vertex = vertexOffset;
    cmdbuf->state.sysvals.gfx.base_instance = firstInstance;
    cmdbuf->state.sysvals.gfx.is_indexed_draw = true;
@@ -3773,7 +3956,7 @@ dzn_CmdDrawIndirect(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
    VK_FROM_HANDLE(dzn_buffer, buf, buffer);
 
-   dzn_cmd_buffer_indirect_draw(cmdbuf, buf, offset, NULL, 0, drawCount, stride, false);
+   dzn_cmd_buffer_indirect_draw(cmdbuf, buf->res, offset, NULL, 0, drawCount, stride, false);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -3786,7 +3969,7 @@ dzn_CmdDrawIndexedIndirect(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
    VK_FROM_HANDLE(dzn_buffer, buf, buffer);
 
-   dzn_cmd_buffer_indirect_draw(cmdbuf, buf, offset, NULL, 0, drawCount, stride, true);
+   dzn_cmd_buffer_indirect_draw(cmdbuf, buf->res, offset, NULL, 0, drawCount, stride, true);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -3802,8 +3985,8 @@ dzn_CmdDrawIndirectCount(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(dzn_buffer, buf, buffer);
    VK_FROM_HANDLE(dzn_buffer, count_buf, countBuffer);
 
-   dzn_cmd_buffer_indirect_draw(cmdbuf, buf, offset,
-                                count_buf, countBufferOffset,
+   dzn_cmd_buffer_indirect_draw(cmdbuf, buf->res, offset,
+                                count_buf->res, countBufferOffset,
                                 maxDrawCount, stride, false);
 }
 
@@ -3820,8 +4003,8 @@ dzn_CmdDrawIndexedIndirectCount(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(dzn_buffer, buf, buffer);
    VK_FROM_HANDLE(dzn_buffer, count_buf, countBuffer);
 
-   dzn_cmd_buffer_indirect_draw(cmdbuf, buf, offset,
-                                count_buf, countBufferOffset,
+   dzn_cmd_buffer_indirect_draw(cmdbuf, buf->res, offset,
+                                count_buf->res, countBufferOffset,
                                 maxDrawCount, stride, true);
 }
 
@@ -3864,14 +4047,22 @@ dzn_CmdBindIndexBuffer(VkCommandBuffer commandBuffer,
    switch (indexType) {
    case VK_INDEX_TYPE_UINT16:
       cmdbuf->state.ib.view.Format = DXGI_FORMAT_R16_UINT;
+      cmdbuf->state.pipeline_variant.ib_strip_cut = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF;
       break;
    case VK_INDEX_TYPE_UINT32:
       cmdbuf->state.ib.view.Format = DXGI_FORMAT_R32_UINT;
+      cmdbuf->state.pipeline_variant.ib_strip_cut = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF;
       break;
    default: unreachable("Invalid index type");
    }
 
    cmdbuf->state.dirty |= DZN_CMD_DIRTY_IB;
+
+   const struct dzn_graphics_pipeline *pipeline =
+      (const struct dzn_graphics_pipeline *)cmdbuf->state.pipeline;
+
+   if (pipeline && dzn_graphics_pipeline_get_desc_template(pipeline, ib_strip_cut))
+      cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].dirty |= DZN_CMD_BINDPOINT_DIRTY_PIPELINE;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -4271,7 +4462,12 @@ dzn_CmdSetDepthBias(VkCommandBuffer commandBuffer,
                     float depthBiasClamp,
                     float depthBiasSlopeFactor)
 {
-   dzn_stub();
+   VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+
+   cmdbuf->state.pipeline_variant.depth_bias.constant_factor = depthBiasConstantFactor;
+   cmdbuf->state.pipeline_variant.depth_bias.clamp = depthBiasClamp;
+   cmdbuf->state.pipeline_variant.depth_bias.slope_factor = depthBiasSlopeFactor;
+   cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].dirty |= DZN_CMD_BINDPOINT_DIRTY_PIPELINE;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -4291,8 +4487,15 @@ dzn_CmdSetDepthBounds(VkCommandBuffer commandBuffer,
                       float maxDepthBounds)
 {
    VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+   struct dzn_device *device = container_of(cmdbuf->vk.base.device, struct dzn_device, vk);
+   struct dzn_physical_device *pdev =
+      container_of(device->vk.physical, struct dzn_physical_device, vk);
 
-   ID3D12GraphicsCommandList1_OMSetDepthBounds(cmdbuf->cmdlist, minDepthBounds, maxDepthBounds);
+   if (pdev->options2.DepthBoundsTestSupported) {
+      cmdbuf->state.zsa.depth_bounds.min = minDepthBounds;
+      cmdbuf->state.zsa.depth_bounds.max = maxDepthBounds;
+      cmdbuf->state.dirty |= DZN_CMD_DIRTY_DEPTH_BOUNDS;
+   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -4302,13 +4505,18 @@ dzn_CmdSetStencilCompareMask(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
 
-   if (faceMask & VK_STENCIL_FACE_FRONT_BIT)
+   if (faceMask & VK_STENCIL_FACE_FRONT_BIT) {
       cmdbuf->state.zsa.stencil_test.front.compare_mask = compareMask;
+      cmdbuf->state.pipeline_variant.stencil_test.front.compare_mask = compareMask;
+   }
 
-   if (faceMask & VK_STENCIL_FACE_BACK_BIT)
+   if (faceMask & VK_STENCIL_FACE_BACK_BIT) {
       cmdbuf->state.zsa.stencil_test.back.compare_mask = compareMask;
+      cmdbuf->state.pipeline_variant.stencil_test.back.compare_mask = compareMask;
+   }
 
    cmdbuf->state.dirty |= DZN_CMD_DIRTY_STENCIL_COMPARE_MASK;
+   cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].dirty |= DZN_CMD_BINDPOINT_DIRTY_PIPELINE;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -4318,13 +4526,18 @@ dzn_CmdSetStencilWriteMask(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
 
-   if (faceMask & VK_STENCIL_FACE_FRONT_BIT)
+   if (faceMask & VK_STENCIL_FACE_FRONT_BIT) {
       cmdbuf->state.zsa.stencil_test.front.write_mask = writeMask;
+      cmdbuf->state.pipeline_variant.stencil_test.front.write_mask = writeMask;
+   }
 
-   if (faceMask & VK_STENCIL_FACE_BACK_BIT)
+   if (faceMask & VK_STENCIL_FACE_BACK_BIT) {
       cmdbuf->state.zsa.stencil_test.back.write_mask = writeMask;
+      cmdbuf->state.pipeline_variant.stencil_test.back.write_mask = writeMask;
+   }
 
    cmdbuf->state.dirty |= DZN_CMD_DIRTY_STENCIL_WRITE_MASK;
+   cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].dirty |= DZN_CMD_BINDPOINT_DIRTY_PIPELINE;
 }
 
 VKAPI_ATTR void VKAPI_CALL

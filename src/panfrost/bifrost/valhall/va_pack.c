@@ -248,6 +248,9 @@ va_pack_shift_lanes(enum bi_swizzle swz)
    switch (swz) {
    case BI_SWIZZLE_H01:    return VA_LANES_8_BIT_B02;
    case BI_SWIZZLE_B0000:  return VA_LANES_8_BIT_B00;
+   case BI_SWIZZLE_B1111:  return VA_LANES_8_BIT_B11;
+   case BI_SWIZZLE_B2222:  return VA_LANES_8_BIT_B22;
+   case BI_SWIZZLE_B3333:  return VA_LANES_8_BIT_B33;
    default: unreachable("todo: more shifts");
    }
 }
@@ -266,14 +269,14 @@ va_pack_combine(enum bi_swizzle swz)
 static enum va_source_format
 va_pack_source_format(const bi_instr *I)
 {
-   switch (I->register_format) {
-   case BI_REGISTER_FORMAT_AUTO:
-   case BI_REGISTER_FORMAT_S32:
-   case BI_REGISTER_FORMAT_U32: return VA_SOURCE_FORMAT_SRC_FLAT32;
-   case BI_REGISTER_FORMAT_F32: return VA_SOURCE_FORMAT_SRC_F32;
-   case BI_REGISTER_FORMAT_F16: return VA_SOURCE_FORMAT_SRC_F16;
-   default: unreachable("unhandled register format");
+   switch (I->source_format) {
+   case BI_SOURCE_FORMAT_FLAT32: return VA_SOURCE_FORMAT_SRC_FLAT32;
+   case BI_SOURCE_FORMAT_FLAT16: return VA_SOURCE_FORMAT_SRC_FLAT16;
+   case BI_SOURCE_FORMAT_F32: return VA_SOURCE_FORMAT_SRC_F32;
+   case BI_SOURCE_FORMAT_F16: return VA_SOURCE_FORMAT_SRC_F16;
    }
+
+   unreachable("unhandled source format");
 }
 
 static uint64_t
@@ -619,10 +622,8 @@ va_pack_instr(const bi_instr *I)
    uint64_t hex = info.exact | (((uint64_t) I->flow) << 59);
    hex |= ((uint64_t) va_select_fau_page(I)) << 57;
 
-   if (info.slot) {
-      uint64_t slot = (I->op == BI_OPCODE_BARRIER) ? 7 : 0;
-      hex |= (slot << 30);
-   }
+   if (info.slot)
+      hex |= ((uint64_t) I->slot << 30);
 
    if (info.sr_count) {
       bool read = bi_opcode_props[I->op].sr_read;
@@ -795,30 +796,6 @@ va_pack_instr(const bi_instr *I)
    return hex;
 }
 
-static bool
-va_last_in_block(bi_block *block, bi_instr *I)
-{
-   return (I->link.next == &block->instructions);
-}
-
-static bool
-va_should_return(bi_block *block, bi_instr *I)
-{
-   /* Don't return within a block */
-   if (!va_last_in_block(block, I))
-      return false;
-
-   /* Don't return if we're succeeded by instructions */
-   for (unsigned i = 0; i < ARRAY_SIZE(block->successors); ++i) {
-      bi_block *succ = block->successors[i];
-
-      if (succ && !bi_is_terminal_block(succ))
-         return false;
-   }
-
-   return true;
-}
-
 static unsigned
 va_instructions_in_block(bi_block *block)
 {
@@ -905,15 +882,13 @@ va_lower_branch_target(bi_context *ctx, bi_block *start, bi_instr *I)
 static void
 va_lower_blend(bi_context *ctx)
 {
-   bool last_blend = true;
-
    /* Link register (ABI between fragment and blend shaders) */
    bi_index lr = bi_register(48);
 
    /* Program counter for *next* instruction */
    bi_index pc = bi_fau(BIR_FAU_PROGRAM_COUNTER, false);
 
-   bi_foreach_instr_global_rev(ctx, I) {
+   bi_foreach_instr_global(ctx, I) {
       if (I->op != BI_OPCODE_BLEND)
          continue;
 
@@ -921,7 +896,7 @@ va_lower_blend(bi_context *ctx)
 
       unsigned prolog_length = 2 * 8;
 
-      if (last_blend)
+      if (I->flow == VA_FLOW_END)
          bi_iadd_imm_i32_to(&b, lr, va_zero_lut(), 0);
       else
          bi_iadd_imm_i32_to(&b, lr, pc, prolog_length - 8);
@@ -929,66 +904,8 @@ va_lower_blend(bi_context *ctx)
       bi_branchzi(&b, va_zero_lut(), I->src[3], BI_CMPF_EQ);
 
       /* For fixed function: skip the prologue, or return */
-      if (last_blend)
-         I->flow = 0x7 | 0x8; /* .return */
-      else
+      if (I->flow != VA_FLOW_END)
          I->branch_offset = prolog_length;
-
-      /* Iterate backwards makes the last BLEND easy to identify */
-      last_blend = false;
-   }
-}
-
-/*
- * Add a flow control modifier to an instruction. There may be an existing flow
- * control modifier; if so, we need to add a NOP with the extra flow control
- * _after_ this instruction
- */
-static void
-va_add_flow(bi_context *ctx, bi_instr *I, enum va_flow flow)
-{
-   if (I->flow != VA_FLOW_NONE) {
-      bi_builder b = bi_init_builder(ctx, bi_after_instr(I));
-      I = bi_nop(&b);
-   }
-
-   I->flow = flow;
-}
-
-/*
- * Add flow control modifiers to the program. This is a stop gap until we have a
- * proper scheduler. For now, this should be conformant while doing little
- * optimization of message waits.
- */
-static void
-va_lower_flow_control(bi_context *ctx)
-{
-   bi_foreach_block(ctx, block) {
-      bool block_reconverges = bi_reconverge_branches(block);
-
-      bi_foreach_instr_in_block_safe(block, I) {
-         /* If this instruction returns, there is nothing left to do. */
-         if (va_should_return(block, I)) {
-            I->flow = VA_FLOW_END;
-            continue;
-         }
-
-         /* We may need to wait */
-         if (I->op == BI_OPCODE_BARRIER)
-            va_add_flow(ctx, I, VA_FLOW_WAIT);
-         else if (bi_opcode_props[I->op].message)
-            va_add_flow(ctx, I, VA_FLOW_WAIT0);
-
-         /* Lastly, we may need to reconverge. If we need reconvergence, it
-          * has to be on the last instruction of the block. If we have to
-          * generate a NOP for that reconverge, we need that to be last. So
-          * this ordering is careful.
-          */
-         if (va_last_in_block(block, I) && block_reconverges)
-            va_add_flow(ctx, I, VA_FLOW_RECONVERGE);
-
-
-      }
    }
 }
 
@@ -1002,8 +919,6 @@ bi_pack_valhall(bi_context *ctx, struct util_dynarray *emission)
    /* Late lowering */
    if (ctx->stage == MESA_SHADER_FRAGMENT && !ctx->inputs->is_blend)
       va_lower_blend(ctx);
-
-   va_lower_flow_control(ctx);
 
    bi_foreach_block(ctx, block) {
       bi_foreach_instr_in_block(block, I) {

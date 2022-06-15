@@ -1,10 +1,3 @@
-# probable ACO bug: #6276
-KHR-GL46.shader_storage_buffer_object.basic-operations-case1-cs,Fail
-KHR-GL46.shader_storage_buffer_object.basic-operations-case1-vs,Fail
-
-# probable sparse binding bug: #6245
-KHR-GL46.sparse_buffer_tests.BufferStorageTest,Fail
-
 # 3D isn't supported by radv yet: #5822
 KHR-GL46.sparse_texture_tests.InternalFormatQueries,Fail
 KHR-GL46.sparse_texture_tests.SparseTextureAllocation,Fail
@@ -13,7 +6,17 @@ KHR-GL46.sparse_texture_tests.SparseTextureCommitment,Fail
 # amd issue #6305
 KHR-GL46.shader_ballot_tests.ShaderBallotFunctionRead,Fail
 
-
+# RADV regression #6597
+dEQP-GLES31.functional.texture.texture_buffer.render_modify.as_index_array_as_fragment_texture.bufferdata,Fail
+dEQP-GLES31.functional.texture.texture_buffer.render_modify.as_index_array_as_vertex_texture_as_fragment_texture.bufferdata,Fail
+dEQP-GLES31.functional.texture.texture_buffer.render_modify.as_vertex_array_as_fragment_texture.bufferdata,Fail
+dEQP-GLES31.functional.texture.texture_buffer.render_modify.as_vertex_array_as_fragment_texture.buffersubdata,Fail
+dEQP-GLES31.functional.texture.texture_buffer.render_modify.as_vertex_array_as_index_array_as_fragment_texture.bufferdata,Fail
+dEQP-GLES31.functional.texture.texture_buffer.render_modify.as_vertex_array_as_index_array_as_vertex_texture_as_fragment_texture.bufferdata,Fail
+dEQP-GLES31.functional.texture.texture_buffer.render_modify.as_vertex_array_as_vertex_texture_as_fragment_texture.bufferdata,Fail
+dEQP-GLES31.functional.texture.texture_buffer.render_modify.as_vertex_array_as_vertex_texture_as_fragment_texture.buffersubdata,Fail
+dEQP-GLES31.functional.texture.texture_buffer.render_modify.as_vertex_texture_as_fragment_texture.bufferdata,Fail
+dEQP-GLES31.functional.texture.texture_buffer.render_modify.as_vertex_texture_as_fragment_texture.buffersubdata,Fail
 
 dEQP-GLES2.functional.clipping.line.wide_line_clip_viewport_center,Fail
 dEQP-GLES2.functional.clipping.line.wide_line_clip_viewport_corner,Fail
@@ -101,10 +104,6 @@ dEQP-GLES31.functional.primitive_bounding_box.wide_points.tessellation_set_per_p
 dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.non_multisample_buffer.sample_n_default_framebuffer,Fail
 dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.non_multisample_buffer.sample_n_singlesample_rbo,Fail
 dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.non_multisample_buffer.sample_n_singlesample_texture,Fail
-dEQP-GLES31.functional.stencil_texturing.render.depth24_stencil8_clear,Fail
-dEQP-GLES31.functional.stencil_texturing.render.depth32f_stencil8_clear,Fail
-dEQP-GLES31.functional.synchronization.in_invocation.ssbo_alias_write,Fail
-dEQP-GLES31.functional.synchronization.inter_invocation.ssbo_alias_write,Fail
 dEQP-GLES31.functional.texture.border_clamp.formats.depth24_stencil8_sample_stencil.nearest_size_npot,Fail
 dEQP-GLES31.functional.texture.border_clamp.formats.depth24_stencil8_sample_stencil.nearest_size_pot,Fail
 dEQP-GLES31.functional.texture.border_clamp.formats.depth32f_stencil8_sample_stencil.nearest_size_npot,Fail
@@ -470,15 +469,6 @@ spec@egl_khr_surfaceless_context@viewport,Fail
 spec@egl_mesa_configless_context@basic,Fail
 spec@ext_framebuffer_blit@fbo-blit-check-limits,Fail
 
-# need to investigate this at some point
-spec@ext_framebuffer_multisample@accuracy 6 depth_resolve small depthstencil,Fail
-spec@ext_framebuffer_multisample@accuracy 8 depth_resolve small depthstencil,Fail
-spec@ext_framebuffer_multisample@accuracy all_samples depth_resolve small depthstencil,Fail
-
-spec@ext_framebuffer_multisample@alpha-to-coverage-no-draw-buffer-zero 2,Fail
-spec@ext_framebuffer_multisample@alpha-to-coverage-no-draw-buffer-zero 4,Fail
-spec@ext_framebuffer_multisample@alpha-to-coverage-no-draw-buffer-zero 6,Fail
-spec@ext_framebuffer_multisample@alpha-to-coverage-no-draw-buffer-zero 8,Fail
 spec@ext_framebuffer_multisample@alpha-to-one-dual-src-blend 2,Fail
 spec@ext_framebuffer_multisample@alpha-to-one-dual-src-blend 4,Fail
 spec@ext_framebuffer_multisample@alpha-to-one-dual-src-blend 6,Fail
@@ -713,7 +703,6 @@ spec@!opengl 1.1@texwrap formats bordercolor-swizzled@GL_RGBA16- swizzled- borde
 spec@!opengl 1.1@texwrap formats bordercolor-swizzled@GL_RGBA2- swizzled- border color only,Fail
 spec@!opengl 1.1@texwrap formats bordercolor-swizzled@GL_RGBA4- swizzled- border color only,Fail
 spec@!opengl 1.1@texwrap formats bordercolor-swizzled@GL_RGBA8- swizzled- border color only,Fail
-spec@!opengl 1.4@gl-1.4-polygon-offset,Fail
 spec@!opengl 1.5@depth-tex-compare,Fail
 spec@!opengl 2.0@depth-tex-modes-glsl,Fail
 spec@!opengl 2.0@gl-2.0-edgeflag,Fail

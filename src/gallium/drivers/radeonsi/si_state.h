@@ -535,7 +535,7 @@ void si_init_state_functions(struct si_context *sctx);
 void si_init_screen_state_functions(struct si_screen *sscreen);
 void si_init_cs_preamble_state(struct si_context *sctx, bool uses_reg_shadowing);
 void si_make_buffer_descriptor(struct si_screen *screen, struct si_resource *buf,
-                               enum pipe_format format, unsigned offset, unsigned size,
+                               enum pipe_format format, unsigned offset, unsigned num_elements,
                                uint32_t *state);
 void si_set_sampler_depth_decompress_mask(struct si_context *sctx, struct si_texture *tex);
 void si_update_fb_dirtiness_after_rendering(struct si_context *sctx);
@@ -583,7 +583,6 @@ void si_vs_key_update_inputs(struct si_context *sctx);
 void si_get_vs_key_inputs(struct si_context *sctx, union si_shader_key *key,
                           struct si_vs_prolog_bits *prolog_key);
 void si_update_ps_inputs_read_or_disabled(struct si_context *sctx);
-void si_update_ps_kill_enable(struct si_context *sctx);
 void si_update_vrs_flat_shading(struct si_context *sctx);
 unsigned si_get_input_prim(const struct si_shader_selector *gs, const union si_shader_key *key);
 bool si_update_ngg(struct si_context *sctx);
@@ -648,6 +647,20 @@ static inline unsigned si_get_image_slot(unsigned slot)
    /* image slots are in [31..0] (sampler slots [15..0]), descending */
    /* images are in slots [31..16], while FMASKs are in slots [15..0] */
    return SI_NUM_IMAGE_SLOTS - 1 - slot;
+}
+
+static inline unsigned si_clamp_texture_texel_count(unsigned max_texel_buffer_elements,
+                                                    enum pipe_format format,
+                                                    uint32_t size)
+{
+   /* The spec says:
+    *    The number of texels in the texel array is then clamped to the value of
+    *    the implementation-dependent limit GL_MAX_TEXTURE_BUFFER_SIZE.
+    *
+    * So compute the number of texels, compare to GL_MAX_TEXTURE_BUFFER_SIZE and update it.
+    */
+   unsigned stride = util_format_get_blocksize(format);
+   return MIN2(max_texel_buffer_elements, size / stride);
 }
 
 #ifdef __cplusplus

@@ -313,7 +313,6 @@ struct gl_shader_compiler_options
    /** Driver-selectable options: */
    GLboolean EmitNoCont;                  /**< Emit CONT opcode? */
    GLboolean EmitNoMainReturn;            /**< Emit CONT/RET opcodes? */
-   GLboolean EmitNoSat;                   /**< Emit SAT opcodes? */
    GLboolean LowerCombinedClipCullDistance; /** Lower gl_ClipDistance and
                                               * gl_CullDistance together from
                                               * float[8] to vec4[2]
@@ -346,11 +345,9 @@ struct gl_shader_compiler_options
    GLboolean EmitNoIndirectOutput;  /**< No indirect addressing of outputs */
    GLboolean EmitNoIndirectTemp;    /**< No indirect addressing of temps */
    GLboolean EmitNoIndirectUniform; /**< No indirect addressing of constants */
-   GLboolean EmitNoIndirectSampler; /**< No indirect addressing of samplers */
    /*@}*/
 
    GLuint MaxIfDepth;               /**< Maximum nested IF blocks */
-   GLuint MaxUnrollIterations;
 
    /**
     * Optimize code for array of structures backends.
@@ -996,5 +993,11 @@ struct gl_constants
    GLuint MaxSparse3DTextureSize;
    GLuint MaxSparseArrayTextureLayers;
    bool SparseTextureFullArrayCubeMipmaps;
+
+   /** Use hardware accelerated GL_SELECT */
+   bool HardwareAcceleratedSelect;
+
+   /** Origin of point coordinates. True if upper left, false if lower left. */
+   bool PointCoordOriginUpperLeft;
 };
 #endif

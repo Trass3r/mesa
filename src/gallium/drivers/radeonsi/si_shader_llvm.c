@@ -188,6 +188,10 @@ void si_llvm_create_func(struct si_shader_context *ctx, const char *name, LLVMTy
                                            ctx->screen->info.address32_hi);
    }
 
+   if (ctx->stage <= MESA_SHADER_GEOMETRY && ctx->shader->key.ge.as_ngg &&
+       si_shader_uses_streamout(ctx->shader))
+      ac_llvm_add_target_dep_function_attr(ctx->main_fn, "amdgpu-gds-size", 256);
+
    ac_llvm_set_workgroup_size(ctx->main_fn, max_workgroup_size);
    ac_llvm_set_target_features(ctx->main_fn, &ctx->ac);
 }
@@ -725,7 +729,7 @@ static LLVMValueRef si_llvm_load_intrinsic(struct ac_shader_abi *abi, nir_intrin
        * (for direct draws) or the CP (for indirect draws) is the
        * first vertex ID, but GLSL expects 0 to be returned.
        */
-      LLVMValueRef indexed = si_unpack_param(ctx, ctx->vs_state_bits, 1, 1);
+      LLVMValueRef indexed = GET_FIELD(ctx, VS_STATE_INDEXED);
       indexed = LLVMBuildTrunc(ctx->ac.builder, indexed, ctx->ac.i1, "");
       return LLVMBuildSelect(ctx->ac.builder, indexed, ac_get_arg(&ctx->ac, ctx->args.base_vertex),
                              ctx->ac.i32_0, "");
@@ -743,10 +747,10 @@ static LLVMValueRef si_llvm_load_intrinsic(struct ac_shader_abi *abi, nir_intrin
    }
 
    case nir_intrinsic_load_tess_level_outer:
-      return abi->load_tess_varyings(abi, ctx->ac.f32, NULL, NULL, info->num_inputs, 0, 4, true, false);
+      return abi->load_tess_varyings(abi, ctx->ac.f32, NULL, NULL, info->num_inputs, 0, 4, true);
 
    case nir_intrinsic_load_tess_level_inner:
-      return abi->load_tess_varyings(abi, ctx->ac.f32, NULL, NULL, info->num_inputs + 1, 0, 4, true, false);
+      return abi->load_tess_varyings(abi, ctx->ac.f32, NULL, NULL, info->num_inputs + 1, 0, 4, true);
 
    case nir_intrinsic_load_tess_level_outer_default:
    case nir_intrinsic_load_tess_level_inner_default: {
@@ -771,6 +775,10 @@ static LLVMValueRef si_llvm_load_intrinsic(struct ac_shader_abi *abi, nir_intrin
 
    case nir_intrinsic_load_sample_mask_in:
       return ac_to_integer(&ctx->ac, ac_get_arg(&ctx->ac, ctx->args.sample_coverage));
+
+   case nir_intrinsic_load_lshs_vertex_stride_amd:
+      return LLVMBuildShl(ctx->ac.builder, si_get_tcs_in_vertex_dw_stride(ctx),
+                          LLVMConstInt(ctx->ac.i32, 2, 0), "");
 
    default:
       return NULL;
@@ -1063,6 +1071,7 @@ bool si_llvm_translate_nir(struct si_shader_context *ctx, struct si_shader *shad
    ctx->abi.load_grid_size_from_user_sgpr = true;
    ctx->abi.clamp_div_by_zero = ctx->screen->options.clamp_div_by_zero ||
                                 info->options & SI_PROFILE_CLAMP_DIV_BY_ZERO;
+   ctx->abi.use_waterfall_for_divergent_tex_samplers = true;
 
    for (unsigned i = 0; i < info->num_outputs; i++) {
       LLVMTypeRef type = ctx->ac.f32;
@@ -1236,9 +1245,6 @@ bool si_llvm_compile_shader(struct si_screen *sscreen, struct ac_llvm_compiler *
          si_llvm_build_tcs_epilog(&ctx, &tcs_epilog_key);
          parts[3] = ctx.main_fn;
 
-         /* VS as LS main part */
-         ctx.next_shader_sel = ctx.shader->selector;
-
          struct si_shader shader_ls = {};
          shader_ls.selector = ls;
          shader_ls.key.ge.part.vs.prolog = shader->key.ge.part.tcs.ls_prolog;
@@ -1248,7 +1254,8 @@ bool si_llvm_compile_shader(struct si_screen *sscreen, struct ac_llvm_compiler *
          shader_ls.key.ge.opt.inline_uniforms = false; /* only TCS can inline uniforms */
          shader_ls.is_monolithic = true;
 
-         nir = si_get_nir_shader(ls, &shader_ls.key, &free_nir);
+         nir = si_get_nir_shader(ls, &shader_ls.key, &free_nir,
+                                 sel->info.tcs_vgpr_only_inputs);
          si_update_shader_binary_info(shader, nir);
 
          if (!si_llvm_translate_nir(&ctx, &shader_ls, nir, free_nir, false)) {
@@ -1308,7 +1315,7 @@ bool si_llvm_compile_shader(struct si_screen *sscreen, struct ac_llvm_compiler *
          shader_es.key.ge.opt.kill_outputs = 0;
          shader_es.is_monolithic = true;
 
-         nir = si_get_nir_shader(es, &shader_es.key, &free_nir);
+         nir = si_get_nir_shader(es, &shader_es.key, &free_nir, 0);
          si_update_shader_binary_info(shader, nir);
 
          if (!si_llvm_translate_nir(&ctx, &shader_es, nir, free_nir, false)) {

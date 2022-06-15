@@ -342,6 +342,13 @@ panfrost_delete_shader_state(
                 panfrost_bo_unreference(shader_state->bin.bo);
                 panfrost_bo_unreference(shader_state->state.bo);
                 panfrost_bo_unreference(shader_state->linkage.bo);
+
+                if (shader_state->xfb) {
+                        panfrost_bo_unreference(shader_state->xfb->bin.bo);
+                        panfrost_bo_unreference(shader_state->xfb->state.bo);
+                        panfrost_bo_unreference(shader_state->xfb->linkage.bo);
+                        free(shader_state->xfb);
+                }
         }
 
         simple_mtx_destroy(&cso->lock);
@@ -524,6 +531,10 @@ panfrost_update_shader_variant(struct panfrost_context *ctx,
 
         /* We need linking information, defer this */
         if (type == PIPE_SHADER_FRAGMENT && !ctx->shader[PIPE_SHADER_VERTEX])
+                return;
+
+        /* Also defer, happens with GALLIUM_HUD */
+        if (!ctx->shader[type])
                 return;
 
         /* Match the appropriate variant */
@@ -1043,6 +1054,7 @@ panfrost_set_stream_output_targets(struct pipe_context *pctx,
                 pipe_so_target_reference(&so->targets[i], NULL);
 
         so->num_targets = num_targets;
+        ctx->dirty |= PAN_DIRTY_SO;
 }
 
 struct pipe_context *

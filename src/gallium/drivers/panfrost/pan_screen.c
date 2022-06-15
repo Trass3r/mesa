@@ -109,7 +109,6 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
         case PIPE_CAP_NPOT_TEXTURES:
         case PIPE_CAP_MIXED_COLOR_DEPTH_BITS:
         case PIPE_CAP_FRAGMENT_SHADER_TEXTURE_LOD:
-        case PIPE_CAP_VERTEX_SHADER_SATURATE:
         case PIPE_CAP_VERTEX_COLOR_UNCLAMPED:
         case PIPE_CAP_POINT_SPRITE:
         case PIPE_CAP_DEPTH_CLIP_DISABLE:
@@ -201,7 +200,7 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
         case PIPE_CAP_CONSTANT_BUFFER_OFFSET_ALIGNMENT:
                 return 16;
 
-        case PIPE_CAP_MAX_TEXTURE_BUFFER_SIZE:
+        case PIPE_CAP_MAX_TEXEL_BUFFER_ELEMENTS_UINT:
                 return 65536;
 
         /* Must be at least 64 for correct behaviour */
@@ -355,6 +354,16 @@ panfrost_get_shader_param(struct pipe_screen *screen,
                 return 0;
         }
 
+        /* We only allow observable side effects (memory writes) in compute and
+         * fragment shaders. Side effects in the geometry pipeline cause
+         * trouble with IDVS.
+         *
+         * This restriction doesn't apply to Midgard, which does not implement
+         * IDVS and therefore executes vertex shaders exactly once.
+         */
+        bool allow_side_effects = (shader != PIPE_SHADER_VERTEX) ||
+                                  (dev->arch <= 5);
+
         switch (param) {
         case PIPE_SHADER_CAP_MAX_INSTRUCTIONS:
         case PIPE_SHADER_CAP_MAX_ALU_INSTRUCTIONS:
@@ -375,7 +384,7 @@ panfrost_get_shader_param(struct pipe_screen *screen,
         case PIPE_SHADER_CAP_MAX_TEMPS:
                 return 256; /* arbitrary */
 
-        case PIPE_SHADER_CAP_MAX_CONST_BUFFER_SIZE:
+        case PIPE_SHADER_CAP_MAX_CONST_BUFFER0_SIZE:
                 return 16 * 1024 * sizeof(float);
 
         case PIPE_SHADER_CAP_MAX_CONST_BUFFERS:
@@ -442,12 +451,11 @@ panfrost_get_shader_param(struct pipe_screen *screen,
                 return (1 << PIPE_SHADER_IR_NIR) | (1 << PIPE_SHADER_IR_NIR_SERIALIZED);
 
         case PIPE_SHADER_CAP_MAX_SHADER_BUFFERS:
-                return 16;
+                return allow_side_effects ? 16 : 0;
 
         case PIPE_SHADER_CAP_MAX_SHADER_IMAGES:
-                return PIPE_MAX_SHADER_IMAGES;
+                return allow_side_effects ? PIPE_MAX_SHADER_IMAGES : 0;
 
-        case PIPE_SHADER_CAP_MAX_UNROLL_ITERATIONS_HINT:
         case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTERS:
         case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTER_BUFFERS:
                 return 0;
@@ -587,6 +595,7 @@ panfrost_walk_dmabuf_modifiers(struct pipe_screen *screen,
         struct panfrost_device *dev = pan_device(screen);
         bool afbc = dev->has_afbc && panfrost_format_supports_afbc(dev, format);
         bool ytr = panfrost_afbc_can_ytr(format);
+        bool tiled_afbc = panfrost_afbc_can_tile(dev);
 
         unsigned count = 0;
 
@@ -595,6 +604,9 @@ panfrost_walk_dmabuf_modifiers(struct pipe_screen *screen,
                         continue;
 
                 if ((pan_best_modifiers[i] & AFBC_FORMAT_MOD_YTR) && !ytr)
+                        continue;
+
+                if ((pan_best_modifiers[i] & AFBC_FORMAT_MOD_TILED) && !tiled_afbc)
                         continue;
 
                 if (test_modifier != DRM_FORMAT_MOD_INVALID &&
@@ -850,12 +862,6 @@ panfrost_create_screen(int fd, struct renderonly *ro)
         panfrost_open_device(screen, fd, dev);
 
         if (dev->debug & PAN_DBG_NO_AFBC)
-                dev->has_afbc = false;
-
-        /* It's early days for Valhall support... disable AFBC for now to keep
-         * hardware bring-up simple
-         */
-        if (dev->arch >= 9)
                 dev->has_afbc = false;
 
         /* Bail early on unsupported hardware */

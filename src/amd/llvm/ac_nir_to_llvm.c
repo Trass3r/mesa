@@ -649,6 +649,15 @@ static void visit_alu(struct ac_nir_context *ctx, const nir_alu_instr *instr)
       result = ac_build_intrinsic(&ctx->ac, name, def_type, src, 2, AC_FUNC_ATTR_READNONE);
       break;
    }
+   case nir_op_usub_sat:
+   case nir_op_isub_sat: {
+      char name[64], type[64];
+      ac_build_type_name_for_intr(def_type, type, sizeof(type));
+      snprintf(name, sizeof(name), "llvm.%csub.sat.%s",
+               instr->op == nir_op_usub_sat ? 'u' : 's', type);
+      result = ac_build_intrinsic(&ctx->ac, name, def_type, src, 2, AC_FUNC_ATTR_READNONE);
+      break;
+   }
    case nir_op_fadd:
       src[0] = ac_to_float(&ctx->ac, src[0]);
       src[1] = ac_to_float(&ctx->ac, src[1]);
@@ -1077,6 +1086,14 @@ static void visit_alu(struct ac_nir_context *ctx, const nir_alu_instr *instr)
    case nir_op_ifind_msb:
       result = ac_build_imsb(&ctx->ac, src[0], ctx->ac.i32);
       break;
+  case nir_op_uclz: {
+      LLVMValueRef params[2] = {
+         src[0],
+         ctx->ac.i1false,
+      };
+      result = ac_build_intrinsic(&ctx->ac, "llvm.ctlz.i32", ctx->ac.i32, params, 2, AC_FUNC_ATTR_READNONE);
+      break;
+  }
    case nir_op_uadd_carry:
       result = emit_uint_carry(&ctx->ac, "llvm.uadd.with.overflow.i32", src[0], src[1]);
       break;
@@ -3021,7 +3038,7 @@ static LLVMValueRef visit_load_local_invocation_index(struct ac_nir_context *ctx
 {
    if (ctx->args->tcs_wave_id.used) {
       return ac_build_imad(&ctx->ac,
-                           ac_unpack_param(&ctx->ac, ac_get_arg(&ctx->ac, ctx->args->tcs_wave_id), 0, 5),
+                           ac_unpack_param(&ctx->ac, ac_get_arg(&ctx->ac, ctx->args->tcs_wave_id), 0, 3),
                            LLVMConstInt(ctx->ac.i32, ctx->ac.wave_size, 0),
                            ac_get_thread_id(&ctx->ac));
    } else if (ctx->args->vs_rel_patch_id.used) {
@@ -3459,17 +3476,10 @@ static LLVMValueRef visit_load(struct ac_nir_context *ctx, nir_intrinsic_instr *
 
    if (ctx->stage == MESA_SHADER_TESS_CTRL ||
        (ctx->stage == MESA_SHADER_TESS_EVAL && !is_output)) {
-      bool vertex_index_is_invoc_id =
-         vertex_index_src &&
-         vertex_index_src->ssa->parent_instr->type == nir_instr_type_intrinsic &&
-         nir_instr_as_intrinsic(vertex_index_src->ssa->parent_instr)->intrinsic ==
-         nir_intrinsic_load_invocation_id;
-
       LLVMValueRef result = ctx->abi->load_tess_varyings(ctx->abi, component_type,
                                                          vertex_index, indir_index,
                                                          base, component,
-                                                         count, !is_output,
-                                                         vertex_index_is_invoc_id);
+                                                         count, !is_output);
       if (instr->dest.ssa.bit_size == 16) {
          result = ac_to_integer(&ctx->ac, result);
          result = LLVMBuildTrunc(ctx->ac.builder, result, dest_type, "");
@@ -3623,6 +3633,10 @@ static void visit_intrinsic(struct ac_nir_context *ctx, nir_intrinsic_instr *ins
    case nir_intrinsic_load_tess_level_inner_default:
    case nir_intrinsic_load_patch_vertices_in:
    case nir_intrinsic_load_sample_mask_in:
+   case nir_intrinsic_load_ring_tess_factors_amd:
+   case nir_intrinsic_load_ring_tess_offchip_amd:
+   case nir_intrinsic_load_ring_esgs_amd:
+   case nir_intrinsic_load_lshs_vertex_stride_amd:
       result = ctx->abi->intrinsic_load(ctx->abi, instr->intrinsic);
       break;
    case nir_intrinsic_load_vertex_id:
@@ -3681,6 +3695,8 @@ static void visit_intrinsic(struct ac_nir_context *ctx, nir_intrinsic_instr *ins
       } else if (ctx->stage == MESA_SHADER_TESS_EVAL) {
          result = ctx->tes_patch_id_replaced ? ctx->tes_patch_id_replaced
                                              : ac_get_arg(&ctx->ac, ctx->args->tes_patch_id);
+      } else if (ctx->stage == MESA_SHADER_VERTEX) {
+         result = ac_get_arg(&ctx->ac, ctx->args->vs_prim_id);
       } else
          fprintf(stderr, "Unknown primitive id intrinsic: %d", ctx->stage);
       break;
@@ -4031,6 +4047,10 @@ static void visit_intrinsic(struct ac_nir_context *ctx, nir_intrinsic_instr *ins
       result = ac_build_gather_values(&ctx->ac, coord, 3);
       break;
    }
+   case nir_intrinsic_load_tess_rel_patch_id_amd:
+      assert(ctx->stage == MESA_SHADER_TESS_CTRL);
+      result = ac_unpack_param(&ctx->ac, ac_get_arg(&ctx->ac, ctx->args->tcs_rel_ids), 0, 8);
+      break;
    case nir_intrinsic_vote_all: {
       result = ac_build_vote_all(&ctx->ac, get_src(ctx, instr->src[0]));
       break;
@@ -4578,10 +4598,22 @@ static void tex_fetch_ptrs(struct ac_nir_context *ctx, nir_tex_instr *instr,
 
    LLVMValueRef sampler_dynamic_index =
       get_sampler_desc_index(ctx, sampler_deref_instr, &instr->instr, false);
-   if (instr->texture_non_uniform)
+
+   /* instr->sampler_non_uniform and texture_non_uniform are always false in GLSL,
+    * but this can lead to unexpected behavior if texture/sampler index come from
+    * a vertex attribute.
+    * For instance, 2 consecutive draws using 2 different index values,
+    * could be squashed together by the hw - producing a single draw with
+    * non-dynamically uniform index.
+    * To avoid this, detect divergent indexing, and use enter_waterfall.
+    * See https://gitlab.freedesktop.org/mesa/mesa/-/issues/2253.
+    */
+   if (instr->texture_non_uniform ||
+       (ctx->abi->use_waterfall_for_divergent_tex_samplers && texture_deref_instr->dest.ssa.divergent))
       texture_dynamic_index = enter_waterfall(ctx, wctx + 0, texture_dynamic_index, true);
 
-   if (instr->sampler_non_uniform)
+   if (instr->sampler_non_uniform ||
+       (ctx->abi->use_waterfall_for_divergent_tex_samplers && sampler_deref_instr->dest.ssa.divergent))
       sampler_dynamic_index = enter_waterfall(ctx, wctx + 1, sampler_dynamic_index, true);
 
    *res_ptr = get_sampler_desc(ctx, texture_deref_instr, main_descriptor, &instr->instr,

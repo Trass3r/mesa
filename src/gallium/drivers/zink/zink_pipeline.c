@@ -54,7 +54,7 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
 {
    struct zink_rasterizer_hw_state *hw_rast_state = (void*)state;
    VkPipelineVertexInputStateCreateInfo vertex_input_state;
-   if (!screen->info.have_EXT_vertex_input_dynamic_state || !state->element_state->num_attribs) {
+   if (!screen->info.have_EXT_vertex_input_dynamic_state || !state->element_state->num_attribs || !state->uses_dynamic_stride) {
       memset(&vertex_input_state, 0, sizeof(vertex_input_state));
       vertex_input_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
       vertex_input_state.pVertexBindingDescriptions = state->element_state->b.bindings;
@@ -108,8 +108,10 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
    VkPipelineColorBlendStateCreateInfo blend_state = {0};
    blend_state.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
    if (state->blend_state) {
-      unsigned num_attachments = state->render_pass->state.num_rts;
-      if (state->render_pass->state.have_zsbuf)
+      unsigned num_attachments = state->render_pass ?
+                                 state->render_pass->state.num_rts :
+                                 state->rendering_info.colorAttachmentCount;
+      if (state->render_pass && state->render_pass->state.have_zsbuf)
          num_attachments--;
       if (state->void_alpha_attachments) {
          for (unsigned i = 0; i < num_attachments; i++) {
@@ -171,7 +173,7 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
    rast_state.depthClampEnable = hw_rast_state->depth_clamp;
    rast_state.rasterizerDiscardEnable = state->dyn_state2.rasterizer_discard;
    rast_state.polygonMode = hw_rast_state->polygon_mode;
-   rast_state.cullMode = hw_rast_state->cull_mode;
+   rast_state.cullMode = state->dyn_state1.cull_mode;
    rast_state.frontFace = state->dyn_state1.front_face;
 
    rast_state.depthBiasEnable = VK_TRUE;
@@ -223,6 +225,7 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
       dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE_EXT;
       dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_FRONT_FACE_EXT;
       dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY_EXT;
+      dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_CULL_MODE_EXT;
       if (state->sample_locations_enabled)
          dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_SAMPLE_LOCATIONS_EXT;
    } else {
@@ -238,6 +241,8 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
    if (screen->info.have_EXT_extended_dynamic_state2) {
       dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE_EXT;
       dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE_EXT;
+      if (screen->info.dynamic_state2_feats.extendedDynamicState2PatchControlPoints)
+         dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_PATCH_CONTROL_POINTS_EXT;
    }
    if (!screen->driver_workarounds.color_write_missing)
       dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_COLOR_WRITE_ENABLE_EXT;
@@ -315,8 +320,11 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
    VkGraphicsPipelineCreateInfo pci = {0};
    pci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
    pci.layout = prog->base.layout;
-   pci.renderPass = state->render_pass->render_pass;
-   if (!screen->info.have_EXT_vertex_input_dynamic_state || !state->element_state->num_attribs)
+   if (state->render_pass)
+      pci.renderPass = state->render_pass->render_pass;
+   else
+      pci.pNext = &state->rendering_info;
+   if (!screen->info.have_EXT_vertex_input_dynamic_state || !state->element_state->num_attribs || !state->uses_dynamic_stride)
       pci.pVertexInputState = &vertex_input_state;
    pci.pInputAssemblyState = &primitive_state;
    pci.pRasterizationState = &rast_state;
@@ -330,7 +338,7 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
    VkPipelineTessellationDomainOriginStateCreateInfo tdci = {0};
    if (prog->shaders[PIPE_SHADER_TESS_CTRL] && prog->shaders[PIPE_SHADER_TESS_EVAL]) {
       tci.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
-      tci.patchControlPoints = state->vertices_per_patch + 1;
+      tci.patchControlPoints = state->dyn_state2.vertices_per_patch;
       pci.pTessellationState = &tci;
       tci.pNext = &tdci;
       tdci.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO;

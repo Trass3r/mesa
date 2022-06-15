@@ -68,6 +68,7 @@ struct radv_pipeline_key {
    uint32_t disable_aniso_single_level : 1;
    uint32_t disable_sinking_load_input_fs : 1;
    uint32_t image_2d_view_of_3d : 1;
+   uint32_t primitives_generated_query : 1;
 
    struct {
       uint32_t instance_rate_inputs;
@@ -143,7 +144,7 @@ enum radv_ud_index {
    AC_UD_INDIRECT_DESCRIPTOR_SETS = 3,
    AC_UD_VIEW_INDEX = 4,
    AC_UD_STREAMOUT_BUFFERS = 5,
-   AC_UD_NGG_GS_STATE = 6,
+   AC_UD_NGG_QUERY_STATE = 6,
    AC_UD_NGG_CULLING_SETTINGS = 7,
    AC_UD_NGG_VIEWPORT = 8,
    AC_UD_FORCE_VRS_RATES = 9,
@@ -364,6 +365,7 @@ struct radv_shader_info {
    struct {
       struct radv_vs_output_info outinfo;
       enum shader_prim output_prim;
+      bool needs_ms_scratch_ring;
    } ms;
 
    struct radv_streamout_info so;
@@ -521,16 +523,18 @@ void radv_nir_apply_pipeline_layout(nir_shader *shader, struct radv_device *devi
 
 struct radv_pipeline_stage;
 
-nir_shader *radv_shader_compile_to_nir(struct radv_device *device,
-                                       const struct radv_pipeline_stage *stage,
-                                       const struct radv_pipeline_key *key);
+nir_shader *radv_shader_spirv_to_nir(struct radv_device *device,
+                                     const struct radv_pipeline_stage *stage,
+                                     const struct radv_pipeline_key *key);
 
 void radv_nir_lower_abi(nir_shader *shader, enum amd_gfx_level gfx_level,
                         const struct radv_shader_info *info, const struct radv_shader_args *args,
-                        const struct radv_pipeline_key *pl_key);
+                        const struct radv_pipeline_key *pl_key, bool use_llvm);
 
 void radv_init_shader_arenas(struct radv_device *device);
 void radv_destroy_shader_arenas(struct radv_device *device);
+
+struct radv_pipeline_shader_stack_size;
 
 VkResult radv_create_shaders(struct radv_pipeline *pipeline,
                              struct radv_pipeline_layout *pipeline_layout,
@@ -539,7 +543,10 @@ VkResult radv_create_shaders(struct radv_pipeline *pipeline,
                              const VkPipelineShaderStageCreateInfo *pStages,
                              uint32_t stageCount,
                              const VkPipelineCreateFlags flags, const uint8_t *custom_hash,
-                             const VkPipelineCreationFeedbackCreateInfo *creation_feedback);
+                             const VkPipelineCreationFeedbackCreateInfo *creation_feedback,
+                             struct radv_pipeline_shader_stack_size **stack_sizes,
+                             uint32_t *num_stack_sizes,
+                             gl_shader_stage *last_vgt_api_stage);
 
 struct radv_shader_args;
 
@@ -547,7 +554,7 @@ struct radv_shader *radv_shader_create(struct radv_device *device,
                                        const struct radv_shader_binary *binary,
                                        bool keep_shader_info, bool from_cache,
                                        const struct radv_shader_args *args);
-struct radv_shader *radv_shader_compile(
+struct radv_shader *radv_shader_nir_to_asm(
    struct radv_device *device, struct radv_pipeline_stage *stage, struct nir_shader *const *shaders,
    int shader_count, const struct radv_pipeline_key *key, bool keep_shader_info, bool keep_statistic_info,
    struct radv_shader_binary **binary_out);
@@ -673,7 +680,7 @@ get_tcs_num_patches(unsigned tcs_num_input_vertices, unsigned tcs_num_output_ver
    return num_patches;
 }
 
-void radv_lower_io(struct radv_device *device, nir_shader *nir);
+void radv_lower_io(struct radv_device *device, nir_shader *nir, bool is_mesh_shading);
 
 bool radv_lower_io_to_mem(struct radv_device *device, struct radv_pipeline_stage *stage,
                           const struct radv_pipeline_key *pl_key);
@@ -681,7 +688,7 @@ bool radv_lower_io_to_mem(struct radv_device *device, struct radv_pipeline_stage
 void radv_lower_ngg(struct radv_device *device, struct radv_pipeline_stage *ngg_stage,
                     const struct radv_pipeline_key *pl_key);
 
-bool radv_consider_culling(struct radv_device *device, struct nir_shader *nir,
+bool radv_consider_culling(const struct radv_physical_device *pdevice, struct nir_shader *nir,
                            uint64_t ps_inputs_read, unsigned num_vertices_per_primitive,
                            const struct radv_shader_info *info);
 

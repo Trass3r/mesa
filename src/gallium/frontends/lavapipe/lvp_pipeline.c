@@ -143,17 +143,26 @@ deep_copy_vertex_input_state(void *mem_ctx,
       vk_foreach_struct(ext, src->pNext) {
          switch (ext->sType) {
          case VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_EXT: {
-            VkPipelineVertexInputDivisorStateCreateInfoEXT *ext_src = (VkPipelineVertexInputDivisorStateCreateInfoEXT *)ext;
-            VkPipelineVertexInputDivisorStateCreateInfoEXT *ext_dst = ralloc(mem_ctx, VkPipelineVertexInputDivisorStateCreateInfoEXT);
-
+            const VkPipelineVertexInputDivisorStateCreateInfoEXT *ext_src = (VkPipelineVertexInputDivisorStateCreateInfoEXT *)ext;
+            unsigned n = ext_src->vertexBindingDivisorCount;
+            if (!n)
+               continue;
+            size_t offset = sizeof(VkPipelineVertexInputDivisorStateCreateInfoEXT);
+            char *p = (char *) ralloc_size(mem_ctx, offset + n * sizeof(VkVertexInputBindingDivisorDescriptionEXT));
+            if (!p)
+               return VK_ERROR_OUT_OF_HOST_MEMORY;
+            VkPipelineVertexInputDivisorStateCreateInfoEXT *ext_dst = (VkPipelineVertexInputDivisorStateCreateInfoEXT *)p;
+            VkVertexInputBindingDivisorDescriptionEXT *dst_divisors = (VkVertexInputBindingDivisorDescriptionEXT *)(p + offset);
             ext_dst->sType = ext_src->sType;
-            ext_dst->vertexBindingDivisorCount = ext_src->vertexBindingDivisorCount;
-
-            LVP_PIPELINE_DUP(ext_dst->pVertexBindingDivisors,
-                             ext_src->pVertexBindingDivisors,
-                             VkVertexInputBindingDivisorDescriptionEXT,
-                             ext_src->vertexBindingDivisorCount);
-
+            ext_dst->pNext = NULL;
+            ext_dst->vertexBindingDivisorCount = n;
+            ext_dst->pVertexBindingDivisors = dst_divisors;
+            const VkVertexInputBindingDivisorDescriptionEXT *src_divisors = ext_src->pVertexBindingDivisors;
+            for (unsigned i = 0; i < n; ++i) {
+               uint32_t d = src_divisors[i].divisor;
+               dst_divisors[i].divisor = d ? d : UINT32_MAX;
+               dst_divisors[i].binding = src_divisors[i].binding;
+            }
             dst->pNext = ext_dst;
             break;
          }
@@ -1013,6 +1022,11 @@ lvp_shader_compile_to_ir(struct lvp_pipeline *pipeline,
 
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
+   if (nir->info.stage == MESA_SHADER_VERTEX ||
+       nir->info.stage == MESA_SHADER_GEOMETRY ||
+       nir->info.stage == MESA_SHADER_TESS_EVAL)
+      nir_shader_gather_xfb_info(nir);
+
    if (nir->info.stage != MESA_SHADER_VERTEX)
       nir_assign_io_var_locations(nir, nir_var_shader_in, &nir->num_inputs, nir->info.stage);
    else {
@@ -1112,7 +1126,7 @@ lvp_pipeline_compile(struct lvp_pipeline *pipeline,
       if (stage == MESA_SHADER_VERTEX ||
           stage == MESA_SHADER_GEOMETRY ||
           stage == MESA_SHADER_TESS_EVAL) {
-         nir_xfb_info *xfb_info = nir_gather_xfb_info(pipeline->pipeline_nir[stage], NULL);
+         nir_xfb_info *xfb_info = pipeline->pipeline_nir[stage]->xfb_info;
          if (xfb_info) {
             uint8_t output_mapping[VARYING_SLOT_TESS_MAX];
             memset(output_mapping, 0, sizeof(output_mapping));
@@ -1138,8 +1152,6 @@ lvp_pipeline_compile(struct lvp_pipeline *pipeline,
                shstate.stream_output.output[i].start_component = ffs(xfb_info->outputs[i].component_mask) - 1;
                shstate.stream_output.output[i].stream = xfb_info->buffer_to_stream[xfb_info->outputs[i].buffer];
             }
-
-            ralloc_free(xfb_info);
          }
       }
 

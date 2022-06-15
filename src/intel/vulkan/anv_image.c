@@ -369,6 +369,46 @@ anv_image_plane_needs_shadow_surface(const struct intel_device_info *devinfo,
    return false;
 }
 
+/**
+ * Return true if the storage image could be used with atomics.
+ *
+ * If the image was created with an explicit format, we check it for typed
+ * atomic support.  If MUTABLE_FORMAT_BIT is set, then we check the optional
+ * format list, seeing if /any/ of the formats support typed atomics.  If no
+ * list is supplied, we fall back to using the bpb, as the application could
+ * make an image view with a format that does use atomics.
+ */
+static bool
+storage_image_format_supports_atomic(const struct intel_device_info *devinfo,
+                                     VkImageCreateFlags create_flags,
+                                     enum isl_format format,
+                                     VkImageTiling vk_tiling,
+                                     const VkImageFormatListCreateInfoKHR *fmt_list)
+{
+   if (isl_format_supports_typed_atomics(devinfo, format))
+      return true;
+
+   if (!(create_flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT))
+      return false;
+
+   if (fmt_list) {
+      for (uint32_t i = 0; i < fmt_list->viewFormatCount; i++) {
+         enum isl_format view_format =
+            anv_get_isl_format(devinfo, fmt_list->pViewFormats[i],
+                               VK_IMAGE_ASPECT_COLOR_BIT, vk_tiling);
+
+         if (isl_format_supports_typed_atomics(devinfo, view_format))
+            return true;
+      }
+
+      return false;
+   }
+
+   /* No explicit format list.  Any 16/32/64bpp format could be used with atomics. */
+   unsigned bpb = isl_format_get_layout(format)->bpb;
+   return bpb == 16 || bpb == 32 || bpb == 64;
+}
+
 static enum isl_format
 anv_get_isl_format_with_usage(const struct intel_device_info *devinfo,
                               VkFormat vk_format,
@@ -450,6 +490,13 @@ anv_formats_ccs_e_compatible(const struct intel_device_info *devinfo,
 
       if (!formats_ccs_e_compatible(devinfo, create_flags, format, vk_tiling,
                                     VK_IMAGE_USAGE_STORAGE_BIT, fmt_list))
+         return false;
+
+      /* Disable compression when surface can be potentially used for atomic
+       * operation.
+       */
+      if (storage_image_format_supports_atomic(devinfo, create_flags, format,
+                                               vk_tiling, fmt_list))
          return false;
    }
 
@@ -2526,7 +2573,7 @@ anv_CreateImageView(VkDevice _device,
    ANV_FROM_HANDLE(anv_image, image, pCreateInfo->image);
    struct anv_image_view *iview;
 
-   iview = vk_image_view_create(&device->vk, pCreateInfo,
+   iview = vk_image_view_create(&device->vk, false, pCreateInfo,
                                 pAllocator, sizeof(*iview));
    if (iview == NULL)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
@@ -2584,6 +2631,7 @@ anv_CreateImageView(VkDevice _device,
          .levels = iview->vk.level_count,
          .base_array_layer = iview->vk.base_array_layer,
          .array_len = iview->vk.layer_count,
+         .min_lod_clamp = iview->vk.min_lod,
          .swizzle = {
             .r = remap_swizzle(iview->vk.swizzle.r, format.swizzle),
             .g = remap_swizzle(iview->vk.swizzle.g, format.swizzle),
@@ -2743,13 +2791,13 @@ anv_CreateBufferView(VkDevice _device,
                                      VK_IMAGE_ASPECT_COLOR_BIT,
                                      VK_IMAGE_TILING_LINEAR);
    const uint32_t format_bs = isl_format_get_layout(view->format)->bpb / 8;
-   view->range = anv_buffer_get_range(buffer, pCreateInfo->offset,
+   view->range = vk_buffer_range(&buffer->vk, pCreateInfo->offset,
                                               pCreateInfo->range);
    view->range = align_down_npot_u32(view->range, format_bs);
 
    view->address = anv_address_add(buffer->address, pCreateInfo->offset);
 
-   if (buffer->usage & VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT) {
+   if (buffer->vk.usage & VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT) {
       view->surface_state = alloc_surface_state(device);
 
       anv_fill_buffer_surface_state(device, view->surface_state,
@@ -2759,7 +2807,7 @@ anv_CreateBufferView(VkDevice _device,
       view->surface_state = (struct anv_state){ 0 };
    }
 
-   if (buffer->usage & VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT) {
+   if (buffer->vk.usage & VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT) {
       view->storage_surface_state = alloc_surface_state(device);
       view->lowered_storage_surface_state = alloc_surface_state(device);
 

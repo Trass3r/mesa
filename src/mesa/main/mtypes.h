@@ -1787,6 +1787,15 @@ struct gl_selection
    GLboolean HitFlag;	/**< hit flag */
    GLfloat HitMinZ;	/**< minimum hit depth */
    GLfloat HitMaxZ;	/**< maximum hit depth */
+
+   /* HW GL_SELECT */
+   void *SaveBuffer;        /**< array holds multi stack data */
+   GLuint SaveBufferTail;   /**< offset to SaveBuffer's tail */
+   GLuint SavedStackNum;    /**< number of saved stacks */
+
+   GLboolean ResultUsed;    /**< whether any draw used result buffer */
+   GLuint ResultOffset;     /**< offset into result buffer */
+   struct gl_buffer_object *Result; /**< result buffer */
 };
 
 
@@ -3062,7 +3071,6 @@ struct gl_client_attrib_node
  * The VBO module implemented in src/vbo.
  */
 struct vbo_context {
-   struct gl_vertex_buffer_binding binding;
    struct gl_array_attributes current[VBO_ATTRIB_MAX];
 
    struct gl_vertex_array_object *VAO;
@@ -3247,6 +3255,11 @@ struct gl_context
     * display list).  Only valid functions between those two are set.
     */
    struct _glapi_table *BeginEnd;
+   /**
+    * Same as BeginEnd except vertex postion set functions. Used when
+    * HW GL_SELECT mode instead of BeginEnd.
+    */
+   struct _glapi_table *HWSelectModeBeginEnd;
    /**
     * Dispatch table for when a graphics reset has happened.
     */

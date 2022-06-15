@@ -49,6 +49,7 @@
 #include "util/list.h"
 #include "util/macros.h"
 #include "vk_alloc.h"
+#include "vk_buffer.h"
 #include "vk_command_buffer.h"
 #include "vk_command_pool.h"
 #include "vk_device.h"
@@ -150,28 +151,24 @@ struct panvk_meta {
       struct {
          mali_ptr shader;
          struct pan_shader_info shader_info;
-      } color[MAX_RTS][3], zs, z, s; /* 3 base types */
+      } color[3]; /* 3 base types */
    } clear_attachment;
 
    struct {
       struct {
          mali_ptr rsd;
-         struct panfrost_ubo_push pushmap;
       } buf2img[PANVK_META_COPY_BUF2IMG_NUM_FORMATS];
       struct {
          mali_ptr rsd;
-         struct panfrost_ubo_push pushmap;
       } img2buf[PANVK_META_COPY_NUM_TEX_TYPES][PANVK_META_COPY_IMG2BUF_NUM_FORMATS];
       struct {
          mali_ptr rsd;
       } img2img[2][PANVK_META_COPY_NUM_TEX_TYPES][PANVK_META_COPY_IMG2IMG_NUM_FORMATS];
       struct {
          mali_ptr rsd;
-         struct panfrost_ubo_push pushmap;
       } buf2buf[PANVK_META_COPY_BUF2BUF_NUM_BLKSIZES];
       struct {
          mali_ptr rsd;
-         struct panfrost_ubo_push pushmap;
       } fillbuf;
    } copy;
 };
@@ -525,11 +522,7 @@ struct panvk_descriptor_pool {
 };
 
 struct panvk_buffer {
-   struct vk_object_base base;
-   VkDeviceSize size;
-
-   VkBufferUsageFlags usage;
-   VkBufferCreateFlags flags;
+   struct vk_buffer vk;
 
    struct panfrost_bo *bo;
    VkDeviceSize bo_offset;
@@ -551,14 +544,7 @@ panvk_buffer_range(const struct panvk_buffer *buffer,
    if (buffer->bo == NULL)
       return 0;
 
-   assert(offset <= buffer->size);
-   if (range == VK_WHOLE_SIZE) {
-      return buffer->size - offset;
-   } else {
-      assert(range + offset >= range);
-      assert(range + offset <= buffer->size);
-      return range;
-   }
+   return vk_buffer_range(&buffer->vk, offset, range);
 }
 
 enum panvk_dynamic_state_bits {
@@ -1110,7 +1096,7 @@ VK_DEFINE_HANDLE_CASTS(panvk_physical_device, vk.base, VkPhysicalDevice, VK_OBJE
 VK_DEFINE_HANDLE_CASTS(panvk_queue, vk.base, VkQueue, VK_OBJECT_TYPE_QUEUE)
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_cmd_pool, vk.base, VkCommandPool, VK_OBJECT_TYPE_COMMAND_POOL)
-VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_buffer, base, VkBuffer, VK_OBJECT_TYPE_BUFFER)
+VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_buffer, vk.base, VkBuffer, VK_OBJECT_TYPE_BUFFER)
 VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_buffer_view, base, VkBufferView, VK_OBJECT_TYPE_BUFFER_VIEW)
 VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_descriptor_pool, base, VkDescriptorPool, VK_OBJECT_TYPE_DESCRIPTOR_POOL)
 VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_descriptor_set, base, VkDescriptorSet, VK_OBJECT_TYPE_DESCRIPTOR_SET)
@@ -1132,7 +1118,6 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_sampler, base, VkSampler, VK_OBJECT_TYPE_SA
 #define panvk_arch_dispatch(arch, name, ...) \
 do { \
    switch (arch) { \
-   case 5: panvk_arch_name(name, v5)(__VA_ARGS__); break; \
    case 6: panvk_arch_name(name, v6)(__VA_ARGS__); break; \
    case 7: panvk_arch_name(name, v7)(__VA_ARGS__); break; \
    default: unreachable("Invalid arch"); \
@@ -1140,9 +1125,7 @@ do { \
 } while (0)
 
 #ifdef PAN_ARCH
-#if PAN_ARCH == 5
-#define panvk_per_arch(name) panvk_arch_name(name, v5)
-#elif PAN_ARCH == 6
+#if PAN_ARCH == 6
 #define panvk_per_arch(name) panvk_arch_name(name, v6)
 #elif PAN_ARCH == 7
 #define panvk_per_arch(name) panvk_arch_name(name, v7)
@@ -1152,14 +1135,6 @@ do { \
 #include "panvk_vX_device.h"
 #include "panvk_vX_meta.h"
 #else
-#define PAN_ARCH 5
-#define panvk_per_arch(name) panvk_arch_name(name, v5)
-#include "panvk_vX_cmd_buffer.h"
-#include "panvk_vX_cs.h"
-#include "panvk_vX_device.h"
-#include "panvk_vX_meta.h"
-#undef PAN_ARCH
-#undef panvk_per_arch
 #define PAN_ARCH 6
 #define panvk_per_arch(name) panvk_arch_name(name, v6)
 #include "panvk_vX_cmd_buffer.h"

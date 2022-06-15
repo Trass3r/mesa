@@ -26,7 +26,7 @@ import xmlrpc.client
 from contextlib import nullcontext as does_not_raise
 from datetime import datetime
 from itertools import cycle, repeat
-from typing import Generator, Iterable, Tuple, Union
+from typing import Callable, Generator, Iterable, Tuple, Union
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -37,12 +37,20 @@ from lava.lava_job_submitter import (
     DEVICE_HANGING_TIMEOUT_SEC,
     NUMBER_OF_RETRIES_TIMEOUT_DETECTION,
     LAVAJob,
+    fix_lava_color_log,
+    fix_lava_gitlab_section_log,
     follow_job_execution,
     hide_sensitive_data,
     retriable_follow_job,
 )
 
 NUMBER_OF_MAX_ATTEMPTS = NUMBER_OF_RETRIES_TIMEOUT_DETECTION + 1
+
+
+def create_lava_yaml_msg(
+    dt: Callable = datetime.now, msg="test", lvl="target"
+) -> dict[str, str]:
+    return {"dt": str(dt()), "msg": msg, "lvl": lvl}
 
 
 def jobs_logs_response(finished=False, msg=None, lvl="target", result=None) -> Tuple[bool, str]:
@@ -342,3 +350,83 @@ def test_log_corruption(mock_sleep, data_sequence, expected_exception, mock_prox
     proxy_logs_mock.side_effect = data_sequence
     with expected_exception:
         retriable_follow_job(proxy_mock, "")
+
+
+COLOR_MANGLED_SCENARIOS = {
+    "Mangled error message at target level": (
+        create_lava_yaml_msg(msg="[0m[0m[31mERROR - dEQP error: ", lvl="target"),
+        "\x1b[0m\x1b[0m\x1b[31mERROR - dEQP error: ",
+    ),
+    "Mangled pass message at target level": (
+        create_lava_yaml_msg(
+            msg="[0mPass: 26718, ExpectedFail: 95, Skip: 25187, Duration: 8:18, Remaining: 13",
+            lvl="target",
+        ),
+        "\x1b[0mPass: 26718, ExpectedFail: 95, Skip: 25187, Duration: 8:18, Remaining: 13",
+    ),
+    "Mangled error message with bold formatting at target level": (
+        create_lava_yaml_msg(msg="[1;31mReview the image changes...", lvl="target"),
+        "\x1b[1;31mReview the image changes...",
+    ),
+    "Mangled error message with high intensity background at target level": (
+        create_lava_yaml_msg(msg="[100mReview the image changes...", lvl="target"),
+        "\x1b[100mReview the image changes...",
+    ),
+    "Mangled error message with underline+bg color+fg color at target level": (
+        create_lava_yaml_msg(msg="[4;41;97mReview the image changes...", lvl="target"),
+        "\x1b[4;41;97mReview the image changes...",
+    ),
+    "Bad input for color code.": (
+        create_lava_yaml_msg(
+            msg="[4;97 This message is missing the `m`.", lvl="target"
+        ),
+        "[4;97 This message is missing the `m`.",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "message, fixed_message",
+    COLOR_MANGLED_SCENARIOS.values(),
+    ids=COLOR_MANGLED_SCENARIOS.keys(),
+)
+def test_fix_lava_color_log(message, fixed_message):
+    fix_lava_color_log(message)
+
+    assert message["msg"] == fixed_message
+
+
+GITLAB_SECTION_MANGLED_SCENARIOS = {
+    "Mangled section_start at target level": (
+        create_lava_yaml_msg(
+            msg="[0Ksection_start:1652658415:deqp[collapsed=false][0Kdeqp-runner",
+            lvl="target",
+        ),
+        "\x1b[0Ksection_start:1652658415:deqp[collapsed=false]\r\x1b[0Kdeqp-runner",
+    ),
+    "Mangled section_start at target level with header with spaces": (
+        create_lava_yaml_msg(
+            msg="[0Ksection_start:1652658415:deqp[collapsed=false][0Kdeqp runner stats",
+            lvl="target",
+        ),
+        "\x1b[0Ksection_start:1652658415:deqp[collapsed=false]\r\x1b[0Kdeqp runner stats",
+    ),
+    "Mangled section_end at target level": (
+        create_lava_yaml_msg(
+            msg="[0Ksection_end:1652658415:test_setup[0K",
+            lvl="target",
+        ),
+        "\x1b[0Ksection_end:1652658415:test_setup\r\x1b[0K",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "message, fixed_message",
+    GITLAB_SECTION_MANGLED_SCENARIOS.values(),
+    ids=GITLAB_SECTION_MANGLED_SCENARIOS.keys(),
+)
+def test_fix_lava_gitlab_section_log(message, fixed_message):
+    fix_lava_gitlab_section_log(message)
+
+    assert message["msg"] == fixed_message

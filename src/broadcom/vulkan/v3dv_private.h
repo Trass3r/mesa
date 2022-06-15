@@ -633,6 +633,10 @@ struct v3dv_image_view {
    uint8_t texture_shader_state[2][V3DV_TEXTURE_SHADER_STATE_LENGTH];
 };
 
+VkResult v3dv_create_image_view(struct v3dv_device *device,
+                                const VkImageViewCreateInfo *pCreateInfo,
+                                VkImageView *pView);
+
 uint32_t v3dv_layer_offset(const struct v3dv_image *image, uint32_t level, uint32_t layer);
 
 struct v3dv_buffer {
@@ -1032,6 +1036,9 @@ struct v3dv_job {
     */
    bool is_clone;
 
+   /* If the job executes on the transfer stage of the pipeline */
+   bool is_transfer;
+
    enum v3dv_job_type type;
 
    struct v3dv_device *device;
@@ -1075,6 +1082,9 @@ struct v3dv_job {
     */
    bool decided_global_ez_enable;
 
+   /* If the job emitted any draw calls with Early Z/S enabled */
+   bool has_ez_draws;
+
    /* If this job has been configured to use early Z/S clear */
    bool early_zs_clear;
 
@@ -1087,8 +1097,10 @@ struct v3dv_job {
     */
    bool always_flush;
 
-   /* Whether we need to serialize this job in our command stream */
-   bool serialize;
+   /* A mask of V3DV_BARRIER_* indicating the source(s) of the barrier. We
+    * can use this to select the hw queues where we need to serialize the job.
+    */
+   uint8_t serialize;
 
    /* If this is a CL job, whether we should sync before binning */
    bool needs_bcl_sync;
@@ -1184,6 +1196,33 @@ struct v3dv_cmd_pipeline_state {
    struct v3dv_descriptor_state descriptor_state;
 };
 
+enum {
+   V3DV_BARRIER_GRAPHICS_BIT = (1 << 0),
+   V3DV_BARRIER_COMPUTE_BIT  = (1 << 1),
+   V3DV_BARRIER_TRANSFER_BIT = (1 << 2),
+};
+#define V3DV_BARRIER_ALL (V3DV_BARRIER_GRAPHICS_BIT | \
+                          V3DV_BARRIER_TRANSFER_BIT | \
+                          V3DV_BARRIER_COMPUTE_BIT);
+
+struct v3dv_barrier_state {
+   /* Mask of V3DV_BARRIER_* indicating where we consume a barrier. */
+   uint8_t dst_mask;
+
+   /* For each possible consumer of a barrier, a mask of V3DV_BARRIER_*
+    * indicating the sources of the dependency.
+    */
+   uint8_t src_mask_graphics;
+   uint8_t src_mask_transfer;
+   uint8_t src_mask_compute;
+
+   /* For graphics barriers, access masks involved. Used to decide if we need
+    * to execute a binning or render barrier.
+    */
+   VkAccessFlags bcl_buffer_access;
+   VkAccessFlags bcl_image_access;
+};
+
 struct v3dv_cmd_buffer_state {
    struct v3dv_render_pass *pass;
    struct v3dv_framebuffer *framebuffer;
@@ -1244,12 +1283,11 @@ struct v3dv_cmd_buffer_state {
    /* Used to flag OOM conditions during command buffer recording */
    bool oom;
 
-   /* Whether we have recorded a pipeline barrier that we still need to
-    * process.
-    */
-   bool has_barrier;
-   VkAccessFlags bcl_barrier_buffer_access;
-   VkAccessFlags bcl_barrier_image_access;
+   /* If we are currently recording job(s) for a transfer operation */
+   bool is_transfer;
+
+   /* Barrier state tracking */
+   struct v3dv_barrier_state barrier;
 
    /* Secondary command buffer state */
    struct {
@@ -1473,6 +1511,9 @@ void v3dv_cmd_buffer_rewrite_indirect_csd_job(struct v3dv_csd_indirect_cpu_job_i
 void v3dv_cmd_buffer_add_private_obj(struct v3dv_cmd_buffer *cmd_buffer,
                                      uint64_t obj,
                                      v3dv_cmd_buffer_private_obj_destroy_cb destroy_cb);
+
+void v3dv_cmd_buffer_merge_barrier_state(struct v3dv_barrier_state *dst,
+                                         struct v3dv_barrier_state *src);
 
 struct v3dv_event {
    struct vk_object_base base;
@@ -1878,6 +1919,11 @@ struct v3dv_pipeline {
 
    enum v3dv_ez_state ez_state;
 
+   /* If ez_state is V3D_EZ_DISABLED, if the reason for disabling is that the
+    * pipeline selects an incompatible depth test function.
+    */
+   bool incompatible_ez_test;
+
    bool msaa;
    bool sample_rate_shading;
    uint32_t sample_mask;
@@ -1997,7 +2043,7 @@ v3dv_get_compatible_tfu_format(struct v3dv_device *device,
                                uint32_t bpp, VkFormat *out_vk_format);
 bool v3dv_buffer_format_supports_features(struct v3dv_device *device,
                                           VkFormat vk_format,
-                                          VkFormatFeatureFlags features);
+                                          VkFormatFeatureFlags2KHR features);
 
 struct v3dv_cl_reloc v3dv_write_uniforms(struct v3dv_cmd_buffer *cmd_buffer,
                                          struct v3dv_pipeline *pipeline,

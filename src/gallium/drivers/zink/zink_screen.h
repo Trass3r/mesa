@@ -43,6 +43,11 @@
 
 #include <vulkan/vulkan.h>
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 extern uint32_t zink_debug;
 struct hash_table;
 struct util_dl_library;
@@ -61,6 +66,8 @@ enum zink_descriptor_type;
 #define ZINK_DEBUG_SPIRV 0x2
 #define ZINK_DEBUG_TGSI 0x4
 #define ZINK_DEBUG_VALIDATION 0x8
+#define ZINK_DEBUG_SYNC 0x10
+#define ZINK_DEBUG_COMPACT (1<<5)
 
 #define NUM_SLAB_ALLOCATORS 3
 #define MIN_SLAB_ORDER 8
@@ -72,7 +79,11 @@ enum zink_descriptor_mode {
    ZINK_DESCRIPTOR_MODE_LAZY,
    ZINK_DESCRIPTOR_MODE_NOFALLBACK,
    ZINK_DESCRIPTOR_MODE_NOTEMPLATES,
+   ZINK_DESCRIPTOR_MODE_COMPACT,
 };
+
+//keep in sync with zink_descriptor_type since headers can't be cross-included
+#define ZINK_MAX_DESCRIPTOR_SETS 6
 
 struct zink_modifier_prop {
     uint32_t                             drmFormatModifierCount;
@@ -92,15 +103,18 @@ struct zink_screen {
    uint32_t last_finished; //this is racy but ultimately doesn't matter
    VkSemaphore sem;
    VkSemaphore prev_sem;
+   VkFence fence;
    struct util_queue flush_queue;
    struct zink_context *copy_context;
 
    unsigned buffer_rebind_counter;
+   unsigned image_rebind_counter;
 
    struct hash_table dts;
    simple_mtx_t dt_lock;
 
    bool device_lost;
+   int drm_fd;
 
    struct hash_table framebuffer_cache;
 
@@ -115,8 +129,6 @@ struct zink_screen {
       struct pb_cache bo_cache;
       struct pb_slabs bo_slabs[NUM_SLAB_ALLOCATORS];
       unsigned min_alloc_size;
-      struct hash_table *bo_export_table;
-      simple_mtx_t bo_export_table_lock;
       uint32_t next_bo_unique_id;
    } pb;
    uint8_t heap_map[VK_MAX_MEMORY_TYPES];
@@ -157,6 +169,8 @@ struct zink_screen {
 
    struct vk_dispatch_table vk;
 
+   bool compact_descriptors;
+   uint8_t desc_set_id[ZINK_MAX_DESCRIPTOR_SETS];
    bool (*descriptor_program_init)(struct zink_context *ctx, struct zink_program *pg);
    void (*descriptor_program_deinit)(struct zink_context *ctx, struct zink_program *pg);
    void (*descriptors_update)(struct zink_context *ctx, bool is_compute);
@@ -188,6 +202,7 @@ struct zink_screen {
    struct {
       bool color_write_missing;
       bool depth_clip_control_missing;
+      bool implicit_sync;
    } driver_workarounds;
 };
 
@@ -294,5 +309,9 @@ zink_stub_function_not_loaded(void);
          warned = true; \
       } \
    } while (0)
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

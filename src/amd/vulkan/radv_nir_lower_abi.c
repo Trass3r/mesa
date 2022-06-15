@@ -34,6 +34,7 @@ typedef struct {
    const struct radv_shader_args *args;
    const struct radv_shader_info *info;
    const struct radv_pipeline_key *pl_key;
+   bool use_llvm;
 } lower_abi_state;
 
 static nir_ssa_def *
@@ -126,7 +127,7 @@ lower_abi_instr(nir_builder *b, nir_instr *instr, void *state)
       return ac_nir_load_arg(b, &s->args->ac, s->args->ac.gs_vtx_offset[0]);
 
    case nir_intrinsic_load_shader_query_enabled_amd:
-      return nir_ieq_imm(b, ac_nir_load_arg(b, &s->args->ac, s->args->ngg_gs_state), 1);
+      return nir_ieq_imm(b, ac_nir_load_arg(b, &s->args->ac, s->args->ngg_query_state), 1);
 
    case nir_intrinsic_load_cull_any_enabled_amd:
       return nggc_bool_setting(b, radv_nggc_front_face | radv_nggc_back_face | radv_nggc_small_primitives, s);
@@ -172,6 +173,14 @@ lower_abi_instr(nir_builder *b, nir_instr *instr, void *state)
    case nir_intrinsic_load_ring_task_payload_amd:
       return load_ring(b, RING_TS_PAYLOAD, s);
 
+   case nir_intrinsic_load_ring_mesh_scratch_amd:
+      return load_ring(b, RING_MS_SCRATCH, s);
+
+   case nir_intrinsic_load_ring_mesh_scratch_offset_amd:
+      /* gs_tg_info[0:11] is ordered_wave_id. Multiply by the ring entry size. */
+      return nir_imul_imm(b, nir_iand_imm(b, ac_nir_load_arg(b, &s->args->ac, s->args->ac.gs_tg_info), 0xfff),
+                                          RADV_MESH_SCRATCH_ENTRY_BYTES);
+
    case nir_intrinsic_load_task_ring_entry_amd:
       return ac_nir_load_arg(b, &s->args->ac, s->args->ac.task_ring_entry);
 
@@ -180,6 +189,13 @@ lower_abi_instr(nir_builder *b, nir_instr *instr, void *state)
 
    case nir_intrinsic_load_task_ib_stride:
       return ac_nir_load_arg(b, &s->args->ac, s->args->task_ib_stride);
+
+   case nir_intrinsic_load_lshs_vertex_stride_amd: {
+      unsigned io_num = stage == MESA_SHADER_VERTEX ?
+         s->info->vs.num_linked_outputs :
+         s->info->tcs.num_linked_inputs;
+      return nir_imm_int(b, io_num * 16);
+   }
 
    default:
       unreachable("invalid NIR RADV ABI intrinsic.");
@@ -190,17 +206,19 @@ static bool
 filter_abi_instr(const nir_instr *instr,
                  UNUSED const void *state)
 {
+   lower_abi_state *s = (lower_abi_state *) state;
+
    if (instr->type != nir_instr_type_intrinsic)
       return false;
 
    nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
-   return intrin->intrinsic == nir_intrinsic_load_ring_tess_factors_amd ||
+   return (intrin->intrinsic == nir_intrinsic_load_ring_tess_factors_amd && !s->use_llvm) ||
+          (intrin->intrinsic == nir_intrinsic_load_ring_tess_offchip_amd && !s->use_llvm) ||
+          (intrin->intrinsic == nir_intrinsic_load_ring_esgs_amd && !s->use_llvm) ||
           intrin->intrinsic == nir_intrinsic_load_ring_tess_factors_offset_amd ||
-          intrin->intrinsic == nir_intrinsic_load_ring_tess_offchip_amd ||
           intrin->intrinsic == nir_intrinsic_load_ring_tess_offchip_offset_amd ||
           intrin->intrinsic == nir_intrinsic_load_patch_vertices_in ||
           intrin->intrinsic == nir_intrinsic_load_tcs_num_patches_amd ||
-          intrin->intrinsic == nir_intrinsic_load_ring_esgs_amd ||
           intrin->intrinsic == nir_intrinsic_load_ring_es2gs_offset_amd ||
           intrin->intrinsic == nir_intrinsic_load_tess_rel_patch_id_amd ||
           intrin->intrinsic == nir_intrinsic_load_gs_vertex_offset_amd ||
@@ -220,21 +238,25 @@ filter_abi_instr(const nir_instr *instr,
           intrin->intrinsic == nir_intrinsic_load_viewport_y_offset ||
           intrin->intrinsic == nir_intrinsic_load_ring_task_draw_amd ||
           intrin->intrinsic == nir_intrinsic_load_ring_task_payload_amd ||
+          intrin->intrinsic == nir_intrinsic_load_ring_mesh_scratch_amd ||
+          intrin->intrinsic == nir_intrinsic_load_ring_mesh_scratch_offset_amd ||
           intrin->intrinsic == nir_intrinsic_load_task_ring_entry_amd ||
           intrin->intrinsic == nir_intrinsic_load_task_ib_addr ||
-          intrin->intrinsic == nir_intrinsic_load_task_ib_stride;
+          intrin->intrinsic == nir_intrinsic_load_task_ib_stride ||
+          intrin->intrinsic == nir_intrinsic_load_lshs_vertex_stride_amd;
 }
 
 void
 radv_nir_lower_abi(nir_shader *shader, enum amd_gfx_level gfx_level,
                    const struct radv_shader_info *info, const struct radv_shader_args *args,
-                   const struct radv_pipeline_key *pl_key)
+                   const struct radv_pipeline_key *pl_key, bool use_llvm)
 {
    lower_abi_state state = {
       .gfx_level = gfx_level,
       .info = info,
       .args = args,
       .pl_key = pl_key,
+      .use_llvm = use_llvm,
    };
 
    nir_shader_lower_instructions(shader, filter_abi_instr, lower_abi_instr, &state);

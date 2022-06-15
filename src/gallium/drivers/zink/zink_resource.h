@@ -82,6 +82,7 @@ struct zink_resource_object {
    bool exportable;
 
    /* TODO: this should be a union */
+   int handle;
    struct zink_bo *bo;
    // struct {
    void *dt;
@@ -102,10 +103,13 @@ struct zink_resource_object {
    uint64_t modifier;
    VkImageAspectFlags modifier_aspect;
    VkSamplerYcbcrConversionKHR sampler_conversion;
-   unsigned plane_sizes[3];
+   unsigned plane_offsets[3];
+   unsigned plane_strides[3];
+   unsigned plane_count;
 
    bool host_visible;
    bool coherent;
+   bool is_aux;
 };
 
 struct zink_resource {
@@ -131,6 +135,7 @@ struct zink_resource {
          VkImageAspectFlags aspect;
          bool optimal_tiling;
          bool need_2D;
+         bool valid;
          uint8_t fb_binds; //not counted in all_binds
       };
    };

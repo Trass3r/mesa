@@ -358,12 +358,6 @@ bool ac_get_supported_modifiers(const struct radeon_info *info,
               AMD_FMT_MOD_SET(DCC_MAX_COMPRESSED_BLOCK, AMD_FMT_MOD_DCC_BLOCK_128B))
 
       if (info->gfx_level >= GFX10_3) {
-         if (info->max_render_backends == 1) {
-            ADD_MOD(AMD_FMT_MOD | common_dcc |
-                    AMD_FMT_MOD_SET(DCC_INDEPENDENT_128B, 1) |
-                    AMD_FMT_MOD_SET(DCC_MAX_COMPRESSED_BLOCK, AMD_FMT_MOD_DCC_BLOCK_128B))
-         }
-
          ADD_MOD(AMD_FMT_MOD | common_dcc |
                  AMD_FMT_MOD_SET(DCC_RETILE, 1) |
                  AMD_FMT_MOD_SET(DCC_INDEPENDENT_128B, 1) |
@@ -372,13 +366,6 @@ bool ac_get_supported_modifiers(const struct radeon_info *info,
 
       if (info->family == CHIP_NAVI12 || info->family == CHIP_NAVI14 || info->gfx_level >= GFX10_3) {
          bool independent_128b = info->gfx_level >= GFX10_3;
-
-         if (info->max_render_backends == 1) {
-            ADD_MOD(AMD_FMT_MOD | common_dcc |
-                    AMD_FMT_MOD_SET(DCC_INDEPENDENT_64B, 1) |
-                    AMD_FMT_MOD_SET(DCC_INDEPENDENT_128B, independent_128b) |
-                    AMD_FMT_MOD_SET(DCC_MAX_COMPRESSED_BLOCK, AMD_FMT_MOD_DCC_BLOCK_64B))
-         }
 
          ADD_MOD(AMD_FMT_MOD | common_dcc |
                  AMD_FMT_MOD_SET(DCC_RETILE, 1) |
@@ -454,12 +441,6 @@ bool ac_get_supported_modifiers(const struct radeon_info *info,
       ADD_MOD(modifier_dcc_best | AMD_FMT_MOD_SET(DCC_PIPE_ALIGN, 1));
 
       /* Displayable modifiers are next. */
-      /* These two will only be used by chips with 1 RB, and they are the best choice there. */
-      if (info->max_render_backends == 1) {
-         ADD_MOD(modifier_dcc_best)
-         ADD_MOD(modifier_dcc_4k)
-      }
-
       /* Add other displayable DCC settings. (DCC_RETILE implies displayable on all chips) */
       ADD_MOD(modifier_dcc_best | AMD_FMT_MOD_SET(DCC_RETILE, 1))
       ADD_MOD(modifier_dcc_4k | AMD_FMT_MOD_SET(DCC_RETILE, 1))
@@ -2276,12 +2257,12 @@ static int gfx9_compute_surface(struct ac_addrlib *addrlib, const struct radeon_
                surf->u.gfx9.color.dcc.max_compressed_block_size = V_028C78_MAX_BLOCK_SIZE_64B;
             }
 
-            if ((info->gfx_level >= GFX10_3 && info->family <= CHIP_YELLOW_CARP) ||
+            if ((info->gfx_level >= GFX10_3 && info->family <= CHIP_REMBRANDT) ||
                 /* Newer chips will skip this when possible to get better performance.
                  * This is also possible for other gfx10.3 chips, but is disabled for
                  * interoperability between different Mesa versions.
                  */
-                (info->family > CHIP_YELLOW_CARP &&
+                (info->family > CHIP_REMBRANDT &&
                  gfx10_DCN_requires_independent_64B_blocks(info, config))) {
                surf->u.gfx9.color.dcc.independent_64B_blocks = 1;
                surf->u.gfx9.color.dcc.independent_128B_blocks = 1;

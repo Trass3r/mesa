@@ -625,6 +625,25 @@ if with_gallium_kmsro and (with_platform_x11 and not with_dri3)
   error('kmsro requires dri3 for X11 support')
 endif
 
+dep_dxheaders = null_dep
+if with_gallium_d3d12 or with_microsoft_clc or with_microsoft_vk
+  dep_dxheaders = dependency('directx-headers', required : false)
+  if not dep_dxheaders.found()
+    dep_dxheaders = dependency('DirectX-Headers',
+      version : '>= 1.602.0',
+      fallback : ['DirectX-Headers', 'dep_dxheaders'],
+      required : with_gallium_d3d12 or with_microsoft_vk
+    )
+  endif
+endif
+
+_with_gallium_d3d12_video = get_option('gallium-d3d12-video')
+with_gallium_d3d12_video = false
+if with_gallium_d3d12 and not _with_gallium_d3d12_video.disabled()
+  with_gallium_d3d12_video = true
+  pre_args += '-DHAVE_GALLIUM_D3D12_VIDEO'
+endif
+
 _vdpau = get_option('gallium-vdpau')
 if _vdpau == 'true'
   _vdpau = 'enabled'
@@ -646,9 +665,9 @@ elif not with_platform_x11
     _vdpau = 'disabled'
   endif
 elif not (with_gallium_r300 or with_gallium_r600 or with_gallium_radeonsi or
-          with_gallium_nouveau)
+          with_gallium_nouveau or with_gallium_d3d12_video)
   if _vdpau == 'enabled'
-    error('VDPAU state tracker requires at least one of the following gallium drivers: r300, r600, radeonsi, nouveau.')
+    error('VDPAU state tracker requires at least one of the following gallium drivers: r300, r600, radeonsi, nouveau, d3d12 (with option gallium-d3d12-video).')
   else
     _vdpau = 'disabled'
   endif
@@ -669,16 +688,6 @@ endif
 vdpau_drivers_path = get_option('vdpau-libs-path')
 if vdpau_drivers_path == ''
   vdpau_drivers_path = join_paths(get_option('libdir'), 'vdpau')
-endif
-
-dep_dxheaders = null_dep
-if with_gallium_d3d12 or with_microsoft_clc or with_microsoft_vk
-  dep_dxheaders = dependency('directx-headers', required : false)
-  if not dep_dxheaders.found()
-    dep_dxheaders = dependency('DirectX-Headers', fallback : ['DirectX-Headers', 'dep_dxheaders'],
-      required : with_gallium_d3d12 or with_microsoft_vk
-    )
-  endif
 endif
 
 if with_vulkan_overlay_layer or with_aco_tests or with_amd_vk
@@ -825,9 +834,9 @@ if not system_has_kms_drm
   else
     _va = 'disabled'
   endif
-elif not (with_gallium_r600 or with_gallium_radeonsi or with_gallium_nouveau)
+elif not (with_gallium_r600 or with_gallium_radeonsi or with_gallium_nouveau or with_gallium_d3d12_video)
   if _va == 'enabled'
-    error('VA state tracker requires at least one of the following gallium drivers: r600, radeonsi, nouveau.')
+    error('VA state tracker requires at least one of the following gallium drivers: r600, radeonsi, nouveau, d3d12 (with option gallium-d3d12-video).')
   else
     _va = 'disabled'
   endif
@@ -1231,7 +1240,7 @@ else
   # Check for C and C++ arguments for MSVC compatibility. These are only used
   # in parts of the mesa code base that need to compile with MSVC, mainly
   # common code
-  _trial_msvc = ['-Werror=pointer-arith', '-Werror=gnu-empty-initializer']
+  _trial_msvc = ['-Werror=pointer-arith', '-Werror=vla', '-Werror=gnu-empty-initializer']
   c_msvc_compat_args += cc.get_supported_arguments(_trial_msvc)
   cpp_msvc_compat_args += cpp.get_supported_arguments(_trial_msvc)
 endif
@@ -1425,12 +1434,28 @@ foreach h : ['xlocale.h', 'linux/futex.h', 'endian.h', 'dlfcn.h', 'sys/shm.h', '
   endif
 endforeach
 
-foreach f : ['strtof', 'mkostemp', 'timespec_get', 'memfd_create', 'random_r',
-             'flock', 'strtok_r', 'getrandom', 'qsort_r', 'qsort_s']
-  if cc.has_function(f)
+functions_to_detect = {
+  'strtof': '',
+  'mkostemp': '',
+  'timespec_get': '#include <time.h>',
+  'memfd_create': '',
+  'random_r': '',
+  'flock': '',
+  'strtok_r': '',
+  'getrandom': '',
+  'qsort_r': '',
+  'qsort_s': '',
+}
+
+foreach f, prefix: functions_to_detect
+  if cc.has_function(f, prefix: prefix)
     pre_args += '-DHAVE_@0@'.format(f.to_upper())
   endif
 endforeach
+
+if cc.has_header_symbol('time.h', 'struct timespec')
+   pre_args += '-DHAVE_STRUCT_TIMESPEC'
+endif
 
 if cc.has_header_symbol('errno.h', 'program_invocation_name',
                         args : '-D_GNU_SOURCE')
@@ -1907,22 +1932,19 @@ if build_machine.system() == 'windows'
     # windows compatibility (uses <io.h> instead of <unistd.h> and _isatty,
     # _fileno functions)
     prog_flex = [prog_flex, '--wincompat']
-    if get_option('c_std') == 'c99'
-      prog_flex += '-D__STDC_VERSION__=199901'
-    endif
   else
     prog_flex = [find_program('flex', 'lex', required : with_any_opengl)]
   endif
   # Force flex to use const keyword in prototypes, as relies on __cplusplus or
-  # __STDC__ macro to determine whether it's safe to use const keyword, but
-  # MSVC only defines __STDC_VERSION__ for C11/C17.
+  # __STDC__ macro to determine whether it's safe to use const keyword
   prog_flex += '-DYY_USE_CONST='
 
   prog_flex_cpp = prog_flex
-  if get_option('c_std') != 'c99'
-    # Convince win_flex to use <inttypes.h> for C++ files
-    prog_flex_cpp += '-D__STDC_VERSION__=199901'
-  endif
+  # Convince win_flex to use <inttypes.h> for C++ files
+  # Note that we are using a C99 version here rather than C11,
+  # because using a C11 version can cause the MSVC CRT headers to define
+  # static_assert to _Static_assert, which breaks other parts of the CRT
+  prog_flex_cpp += '-D__STDC_VERSION__=199901'
 
   prog_bison = find_program('win_bison', required : false)
   if not prog_bison.found()

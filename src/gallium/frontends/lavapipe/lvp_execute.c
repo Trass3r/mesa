@@ -329,8 +329,14 @@ static void emit_state(struct rendering_state *state)
       assert(offsetof(struct pipe_rasterizer_state, offset_clamp) - offsetof(struct pipe_rasterizer_state, offset_units) == sizeof(float) * 2);
       if (state->depth_bias.enabled) {
          memcpy(&state->rs_state.offset_units, &state->depth_bias, sizeof(float) * 3);
+         state->rs_state.offset_tri = true;
+         state->rs_state.offset_line = true;
+         state->rs_state.offset_point = true;
       } else {
          memset(&state->rs_state.offset_units, 0, sizeof(float) * 3);
+         state->rs_state.offset_tri = false;
+         state->rs_state.offset_line = false;
+         state->rs_state.offset_point = false;
       }
       cso_set_rasterizer(state->cso, &state->rs_state);
       state->rs_dirty = false;
@@ -892,13 +898,14 @@ static void handle_graphics_pipeline(struct vk_cmd_queue_entry *cmd,
          state->info.primitive_restart = ia->primitiveRestartEnable;
    }
 
-   if (pipeline->graphics_create_info.pTessellationState) {
-      if (!dynamic_states[conv_dynamic_state_idx(VK_DYNAMIC_STATE_PATCH_CONTROL_POINTS_EXT)]) {
+   if (!dynamic_states[conv_dynamic_state_idx(VK_DYNAMIC_STATE_PATCH_CONTROL_POINTS_EXT)]) {
+      if (pipeline->graphics_create_info.pTessellationState) {
          const VkPipelineTessellationStateCreateInfo *ts = pipeline->graphics_create_info.pTessellationState;
          state->patch_vertices = ts->patchControlPoints;
+      } else {
+         state->patch_vertices = 0;
       }
-   } else
-      state->patch_vertices = 0;
+   }
 
    bool halfz_changed = false;
    if (!pipeline->negative_one_to_one != clip_halfz) {
@@ -964,54 +971,27 @@ static void handle_pipeline(struct vk_cmd_queue_entry *cmd,
    state->push_size[pipeline->is_compute_pipeline] = pipeline->layout->push_constant_size;
 }
 
-static void vertex_buffers(uint32_t first_binding,
-                           uint32_t binding_count,
-                           const VkBuffer *buffers,
-                           const VkDeviceSize *offsets,
-                           const VkDeviceSize *strides,
-                           struct rendering_state *state)
-{
-   int i;
-   for (i = 0; i < binding_count; i++) {
-      int idx = i + first_binding;
-
-      state->vb[idx].buffer_offset = offsets[i];
-      state->vb[idx].buffer.resource = buffers[i] ? lvp_buffer_from_handle(buffers[i])->bo : NULL;
-
-      if (strides)
-         state->vb[idx].stride = strides[i];
-   }
-   if (first_binding < state->start_vb)
-      state->start_vb = first_binding;
-   if (first_binding + binding_count >= state->num_vb)
-      state->num_vb = first_binding + binding_count;
-   state->vb_dirty = true;
-}
-
-static void handle_vertex_buffers(struct vk_cmd_queue_entry *cmd,
-                                  struct rendering_state *state)
-{
-   struct vk_cmd_bind_vertex_buffers *vcb = &cmd->u.bind_vertex_buffers;
-
-   vertex_buffers(vcb->first_binding,
-                  vcb->binding_count,
-                  vcb->buffers,
-                  vcb->offsets,
-                  NULL,
-                  state);
-}
-
 static void handle_vertex_buffers2(struct vk_cmd_queue_entry *cmd,
                                    struct rendering_state *state)
 {
    struct vk_cmd_bind_vertex_buffers2 *vcb = &cmd->u.bind_vertex_buffers2;
 
-   vertex_buffers(vcb->first_binding,
-                  vcb->binding_count,
-                  vcb->buffers,
-                  vcb->offsets,
-                  vcb->strides,
-                  state);
+   int i;
+   for (i = 0; i < vcb->binding_count; i++) {
+      int idx = i + vcb->first_binding;
+
+      state->vb[idx].buffer_offset = vcb->offsets[i];
+      state->vb[idx].buffer.resource =
+         vcb->buffers[i] ? lvp_buffer_from_handle(vcb->buffers[i])->bo : NULL;
+
+      if (vcb->strides)
+         state->vb[idx].stride = vcb->strides[i];
+   }
+   if (vcb->first_binding < state->start_vb)
+      state->start_vb = vcb->first_binding;
+   if (vcb->first_binding + vcb->binding_count >= state->num_vb)
+      state->num_vb = vcb->first_binding + vcb->binding_count;
+   state->vb_dirty = true;
 }
 
 struct dyn_info {
@@ -2233,17 +2213,12 @@ static void handle_copy_image_to_buffer2(struct vk_cmd_queue_entry *cmd,
          }
       }
 
-      unsigned buffer_row_len = util_format_get_stride(dst_format, copycmd->pRegions[i].bufferRowLength);
-      if (buffer_row_len == 0)
-         buffer_row_len = util_format_get_stride(dst_format, copycmd->pRegions[i].imageExtent.width);
-      unsigned buffer_image_height = copycmd->pRegions[i].bufferImageHeight;
-      if (buffer_image_height == 0)
-         buffer_image_height = copycmd->pRegions[i].imageExtent.height;
-
-      unsigned img_stride = util_format_get_2d_size(dst_format, buffer_row_len, buffer_image_height);
+      const struct vk_image_buffer_layout buffer_layout =
+         vk_image_buffer_copy_layout(&src_image->vk, &copycmd->pRegions[i]);
       if (src_format != dst_format) {
          copy_depth_box(dst_data, dst_format,
-                        buffer_row_len, img_stride,
+                        buffer_layout.row_stride_B,
+                        buffer_layout.image_stride_B,
                         0, 0, 0,
                         copycmd->pRegions[i].imageExtent.width,
                         copycmd->pRegions[i].imageExtent.height,
@@ -2251,7 +2226,8 @@ static void handle_copy_image_to_buffer2(struct vk_cmd_queue_entry *cmd,
                         src_data, src_format, src_t->stride, src_t->layer_stride, 0, 0, 0);
       } else {
          util_copy_box((ubyte *)dst_data, src_format,
-                       buffer_row_len, img_stride,
+                       buffer_layout.row_stride_B,
+                       buffer_layout.image_stride_B,
                        0, 0, 0,
                        copycmd->pRegions[i].imageExtent.width,
                        copycmd->pRegions[i].imageExtent.height,
@@ -2313,14 +2289,8 @@ static void handle_copy_buffer_to_image(struct vk_cmd_queue_entry *cmd,
          }
       }
 
-      unsigned buffer_row_len = util_format_get_stride(src_format, copycmd->pRegions[i].bufferRowLength);
-      if (buffer_row_len == 0)
-         buffer_row_len = util_format_get_stride(src_format, copycmd->pRegions[i].imageExtent.width);
-      unsigned buffer_image_height = copycmd->pRegions[i].bufferImageHeight;
-      if (buffer_image_height == 0)
-         buffer_image_height = copycmd->pRegions[i].imageExtent.height;
-
-      unsigned img_stride = util_format_get_2d_size(src_format, buffer_row_len, buffer_image_height);
+      const struct vk_image_buffer_layout buffer_layout =
+         vk_image_buffer_copy_layout(&dst_image->vk, &copycmd->pRegions[i]);
       if (src_format != dst_format) {
          copy_depth_box(dst_data, dst_format,
                         dst_t->stride, dst_t->layer_stride,
@@ -2329,7 +2299,9 @@ static void handle_copy_buffer_to_image(struct vk_cmd_queue_entry *cmd,
                         copycmd->pRegions[i].imageExtent.height,
                         box.depth,
                         src_data, src_format,
-                        buffer_row_len, img_stride, 0, 0, 0);
+                        buffer_layout.row_stride_B,
+                        buffer_layout.image_stride_B,
+                        0, 0, 0);
       } else {
          util_copy_box(dst_data, dst_format,
                        dst_t->stride, dst_t->layer_stride,
@@ -2338,7 +2310,9 @@ static void handle_copy_buffer_to_image(struct vk_cmd_queue_entry *cmd,
                        copycmd->pRegions[i].imageExtent.height,
                        box.depth,
                        src_data,
-                       buffer_row_len, img_stride, 0, 0, 0);
+                       buffer_layout.row_stride_B,
+                       buffer_layout.image_stride_B,
+                       0, 0, 0);
       }
       state->pctx->buffer_unmap(state->pctx, src_t);
       state->pctx->texture_unmap(state->pctx, dst_t);
@@ -3495,13 +3469,13 @@ static void handle_set_vertex_input(struct vk_cmd_queue_entry *cmd,
       state->velem.velems[location].vertex_buffer_index = attrs[i].binding;
       state->velem.velems[location].src_format = lvp_vk_format_to_pipe_format(attrs[i].format);
       state->vb[attrs[i].binding].stride = binding->stride;
-
+      uint32_t d = binding->divisor;
       switch (binding->inputRate) {
       case VK_VERTEX_INPUT_RATE_VERTEX:
          state->velem.velems[location].instance_divisor = 0;
          break;
       case VK_VERTEX_INPUT_RATE_INSTANCE:
-         state->velem.velems[location].instance_divisor = binding->divisor;
+         state->velem.velems[location].instance_divisor = d ? d : UINT32_MAX;
          break;
       default:
          assert(0);
@@ -3678,7 +3652,6 @@ void lvp_add_enqueue_cmd_entrypoints(struct vk_device_dispatch_table *disp)
    ENQUEUE_CMD(CmdSetStencilReference)
    ENQUEUE_CMD(CmdBindDescriptorSets)
    ENQUEUE_CMD(CmdBindIndexBuffer)
-   ENQUEUE_CMD(CmdBindVertexBuffers)
    ENQUEUE_CMD(CmdBindVertexBuffers2)
    ENQUEUE_CMD(CmdDraw)
    ENQUEUE_CMD(CmdDrawMultiEXT)
@@ -3797,9 +3770,6 @@ static void lvp_execute_cmd_buffer(struct lvp_cmd_buffer *cmd_buffer,
          break;
       case VK_CMD_BIND_INDEX_BUFFER:
          handle_index_buffer(cmd, state);
-         break;
-      case VK_CMD_BIND_VERTEX_BUFFERS:
-         handle_vertex_buffers(cmd, state);
          break;
       case VK_CMD_BIND_VERTEX_BUFFERS2:
          handle_vertex_buffers2(cmd, state);

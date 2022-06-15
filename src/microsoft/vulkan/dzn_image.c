@@ -530,6 +530,7 @@ dzn_image_layout_to_state(VkImageLayout layout, VkImageAspectFlagBits aspect)
 
    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
    case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL:
+   case VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL:
       return D3D12_RESOURCE_STATE_DEPTH_WRITE;
 
    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
@@ -636,7 +637,7 @@ dzn_BindImageMemory2(VkDevice dev,
                                                       mem->initial_state,
                                                       NULL,
                                                       &IID_ID3D12Resource,
-                                                      &image->res)))
+                                                      (void **)&image->res)))
             return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          did_bind = true;
       }
@@ -1066,7 +1067,7 @@ dzn_image_view_init(struct dzn_device *device,
    uint32_t plane_slice =
       pCreateInfo->subresourceRange.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT ? 1 : 0;
 
-   vk_image_view_init(&device->vk, &iview->vk, pCreateInfo);
+   vk_image_view_init(&device->vk, &iview->vk, false, pCreateInfo);
 
    assert(layer_count > 0);
    assert(range->baseMipLevel < image->vk.mip_levels);

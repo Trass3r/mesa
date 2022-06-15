@@ -129,6 +129,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_external_memory_fd              = true,
       .KHR_external_semaphore              = true,
       .KHR_external_semaphore_fd           = true,
+      .KHR_format_feature_flags2           = true,
       .KHR_get_memory_requirements2        = true,
       .KHR_image_format_list               = true,
       .KHR_imageless_framebuffer           = true,
@@ -152,6 +153,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_incremental_present             = true,
 #endif
       .KHR_variable_pointers               = true,
+      .KHR_vulkan_memory_model             = true,
       .EXT_4444_formats                    = true,
       .EXT_color_write_enable              = true,
       .EXT_custom_border_color             = true,
@@ -1192,6 +1194,10 @@ v3dv_GetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice,
       .storagePushConstant8 = true,
       .imagelessFramebuffer = true,
       .timelineSemaphore = true,
+
+      .vulkanMemoryModel = true,
+      .vulkanMemoryModelDeviceScope = true,
+      .vulkanMemoryModelAvailabilityVisibilityChains = true,
    };
 
    VkPhysicalDeviceVulkan11Features vk11 = {

@@ -185,8 +185,6 @@
   # depend on more than one image per job. So, the job container is
   # built as part of the CI in the boot2container project.
   image: registry.freedesktop.org/mupuf/valve-infra/mesa-trigger:2022-03-03.2
-  extends:
-    - .use-debian/x86_test-vk
   timeout: 1h 40m
   variables:
     # No need by default to pull the whole repo
@@ -214,7 +212,8 @@
     # we rename the MESA_IMAGE variable into IMAGE_UNDER_TEST.
     IMAGE_UNDER_TEST: "$MESA_IMAGE"
 
-    INSTALL_TARBALL: "./artifacts/install.tar"
+    INSTALL_TARBALL_NAME: "install.tar"
+    INSTALL_TARBALL: "./artifacts/${INSTALL_TARBALL_NAME}"
     CI_VALVE_ARTIFACTS: "./artifacts/valve"
     CI_COMMON_SCRIPTS: "./artifacts/ci-common"
     GENERATE_ENV_SCRIPT: "${CI_COMMON_SCRIPTS}/generate-env.sh"
@@ -246,7 +245,7 @@
       [ -d "$CI_COMMON_SCRIPTS" ] || exit 1
 
 
-      B2C_TEST_SCRIPT="bash -c 'source ./set-job-env-vars.sh ; ${B2C_TEST_SCRIPT}'"
+      B2C_TEST_SCRIPT="bash -c 'source ./set-job-env-vars.sh; tar xf ${INSTALL_TARBALL_NAME}; ${B2C_TEST_SCRIPT}'"
 
       # The Valve CI gateway receives jobs in a YAML format. Create a
       # job description from the CI environment.
@@ -289,9 +288,8 @@
       echo "export CI_JOB_JWT=${CI_JOB_JWT}" >> ${JOB_FOLDER}/set-job-env-vars.sh
       set -x
 
-      # Extract the Mesa distribution into the location expected by
-      # the Mesa CI deqp-runner scripts.
-      tar x -C ${JOB_FOLDER} -f $INSTALL_TARBALL
+      # Copy the mesa install tarball to the job folder, for later extraction
+      mv "${INSTALL_TARBALL}" "${JOB_FOLDER}"
 
   script: |
       slugify () {
@@ -308,9 +306,6 @@
       # Gitlab coordinator for status presentation. results/junit.xml
       # will be parsed by the UI for more detailed explanations of
       # test execution.
-  needs:
-    - debian/x86_test-vk
-    - debian-testing
   artifacts:
     when: always
     name: "mesa_${CI_JOB_NAME}"
@@ -318,3 +313,19 @@
       - ${JOB_FOLDER}/results
     reports:
       junit: ${JOB_FOLDER}/results/junit.xml
+
+.b2c-test-vk:
+  extends:
+    - .use-debian/x86_test-vk
+    - .b2c-test
+  needs:
+    - debian/x86_test-vk
+    - debian-testing
+
+.b2c-test-gl:
+  extends:
+    - .use-debian/x86_test-gl
+    - .b2c-test
+  needs:
+    - debian/x86_test-gl
+    - debian-testing

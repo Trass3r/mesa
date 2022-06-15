@@ -37,7 +37,7 @@ zink_destroy_framebuffer(struct zink_screen *screen,
                          struct zink_framebuffer *fb)
 {
    hash_table_foreach(&fb->objects, he) {
-#if defined(_WIN64) || defined(__x86_64__)
+#if VK_USE_64_BIT_PTR_DEFINES
       VKSCR(DestroyFramebuffer)(screen->dev, he->data, NULL);
 #else
       VkFramebuffer *ptr = he->data;
@@ -60,7 +60,7 @@ zink_init_framebuffer(struct zink_screen *screen, struct zink_framebuffer *fb, s
 
    struct hash_entry *he = _mesa_hash_table_search_pre_hashed(&fb->objects, hash, rp);
    if (he) {
-#if defined(_WIN64) || defined(__x86_64__)
+#if VK_USE_64_BIT_PTR_DEFINES
       ret = (VkFramebuffer)he->data;
 #else
       VkFramebuffer *ptr = he->data;
@@ -90,7 +90,7 @@ zink_init_framebuffer(struct zink_screen *screen, struct zink_framebuffer *fb, s
 
    if (VKSCR(CreateFramebuffer)(screen->dev, &fci, NULL, &ret) != VK_SUCCESS)
       return;
-#if defined(_WIN64) || defined(__x86_64__)
+#if VK_USE_64_BIT_PTR_DEFINES
    _mesa_hash_table_insert_pre_hashed(&fb->objects, hash, rp, ret);
 #else
    VkFramebuffer *ptr = ralloc(fb, VkFramebuffer);
@@ -209,10 +209,8 @@ debug_describe_zink_framebuffer(char* buf, const struct zink_framebuffer *ptr)
 }
 
 void
-zink_update_framebuffer_state(struct zink_context *ctx, int old_w, int old_h)
+zink_update_framebuffer_state(struct zink_context *ctx)
 {
-   if (ctx->fb_state.width != old_w || ctx->fb_state.height != old_h)
-      ctx->scissor_changed = true;
    /* get_framebuffer adds a ref if the fb is reused or created;
     * always do get_framebuffer first to avoid deleting the same fb
     * we're about to use

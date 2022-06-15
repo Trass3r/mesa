@@ -1046,7 +1046,7 @@ handle_vs_outputs_post(struct radv_shader_context *ctx, bool export_prim_id, boo
    }
 
    /* Allocate a temporary array for the output values. */
-   unsigned num_outputs = util_bitcount64(ctx->output_mask) + export_prim_id;
+   unsigned num_outputs = util_bitcount64(ctx->output_mask);
    outputs = malloc(num_outputs * sizeof(outputs[0]));
 
    for (unsigned i = 0; i < AC_LLVM_MAX_OUTPUTS; ++i) {
@@ -1069,20 +1069,6 @@ handle_vs_outputs_post(struct radv_shader_context *ctx, bool export_prim_id, boo
          outputs[noutput].values[j] = ac_to_float(&ctx->ac, radv_load_output(ctx, i, j));
       }
 
-      noutput++;
-   }
-
-   /* Export PrimitiveID. */
-   if (export_prim_id) {
-      outputs[noutput].slot_name = VARYING_SLOT_PRIMITIVE_ID;
-      outputs[noutput].slot_index = 0;
-      outputs[noutput].usage_mask = 0x1;
-      if (ctx->stage == MESA_SHADER_TESS_EVAL)
-         outputs[noutput].values[0] = ac_get_arg(&ctx->ac, ctx->args->ac.tes_patch_id);
-      else
-         outputs[noutput].values[0] = ac_get_arg(&ctx->ac, ctx->args->ac.vs_prim_id);
-      for (unsigned j = 1; j < 4; j++)
-         outputs[noutput].values[j] = ctx->ac.f32_0;
       noutput++;
    }
 
@@ -1468,7 +1454,7 @@ gfx10_ngg_gs_emit_epilogue_2(struct radv_shader_context *ctx)
    LLVMValueRef num_emit_threads = ngg_get_prim_cnt(ctx);
 
    /* Write shader query data. */
-   tmp = ac_get_arg(&ctx->ac, ctx->args->ngg_gs_state);
+   tmp = ac_get_arg(&ctx->ac, ctx->args->ngg_query_state);
    tmp = LLVMBuildTrunc(builder, tmp, ctx->ac.i1, "");
    ac_build_ifcc(&ctx->ac, tmp, 5109);
    tmp = LLVMBuildICmp(builder, LLVMIntULT, tid, LLVMConstInt(ctx->ac.i32, 4, false), "");
@@ -1811,7 +1797,7 @@ handle_fs_outputs_post(struct radv_shader_context *ctx)
    if (depth || stencil || samplemask)
       radv_export_mrt_z(ctx, depth, stencil, samplemask);
    else if (!index)
-      ac_build_export_null(&ctx->ac);
+      ac_build_export_null(&ctx->ac, ctx->shader_info->ps.can_discard);
 }
 
 static void
@@ -2014,10 +2000,18 @@ declare_esgs_ring(struct radv_shader_context *ctx)
 
 static LLVMValueRef radv_intrinsic_load(struct ac_shader_abi *abi, nir_intrinsic_op op)
 {
+   struct radv_shader_context *ctx = radv_shader_context_from_abi(abi);
+
    switch (op) {
    case nir_intrinsic_load_base_vertex:
    case nir_intrinsic_load_first_vertex:
       return radv_load_base_vertex(abi, op == nir_intrinsic_load_base_vertex);
+   case nir_intrinsic_load_ring_tess_factors_amd:
+      return ctx->hs_ring_tess_factor;
+   case nir_intrinsic_load_ring_tess_offchip_amd:
+      return ctx->hs_ring_tess_offchip;
+   case nir_intrinsic_load_ring_esgs_amd:
+      return ctx->esgs_ring;
    default:
       return NULL;
    }

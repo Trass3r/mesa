@@ -82,10 +82,12 @@ emit_instruction(asm_context& ctx, std::vector<uint32_t>& out, Instruction* inst
       instr->opcode = aco_opcode::s_getpc_b64;
       instr->operands.pop_back();
    } else if (instr->opcode == aco_opcode::p_constaddr_addlo) {
-      ctx.constaddrs[instr->operands[1].constantValue()].add_literal = out.size() + 1;
+      ctx.constaddrs[instr->operands[2].constantValue()].add_literal = out.size() + 1;
 
       instr->opcode = aco_opcode::s_add_u32;
-      instr->operands[1] = Operand::zero();
+      instr->operands.pop_back();
+      assert(instr->operands[1].isConstant());
+      /* in case it's an inline constant, make it a literal */
       instr->operands[1].setFixed(PhysReg(255));
    }
 
@@ -703,6 +705,7 @@ emit_instruction(asm_context& ctx, std::vector<uint32_t>& out, Instruction* inst
          out.push_back(encoding);
          return;
       } else if (instr->isSDWA()) {
+         assert(ctx.gfx_level >= GFX8 && ctx.gfx_level < GFX11);
          SDWA_instruction& sdwa = instr->sdwa();
 
          /* first emit the instruction without the SDWA operand */
@@ -901,7 +904,7 @@ emit_long_jump(asm_context& ctx, SOPP_instruction* branch, bool backwards,
       case aco_opcode::s_cbranch_execnz: inv = aco_opcode::s_cbranch_execz; break;
       default: unreachable("Unhandled long jump.");
       }
-      instr.reset(bld.sopp(inv, -1, 7));
+      instr.reset(bld.sopp(inv, -1, 6));
       emit_instruction(ctx, out, instr.get());
    }
 
@@ -914,10 +917,7 @@ emit_long_jump(asm_context& ctx, SOPP_instruction* branch, bool backwards,
    emit_instruction(ctx, out, instr.get());
    branch->pass_flags = out.size();
 
-   instr.reset(bld.sop2(aco_opcode::s_addc_u32, def_tmp_hi, op_tmp_hi,
-                        Operand::c32(backwards ? UINT32_MAX : 0u))
-                  .instr);
-   emit_instruction(ctx, out, instr.get());
+   /* s_addc_u32 for high 32 bits not needed because the program is in a 32-bit VA range */
 
    /* restore SCC and clear the LSB of the new PC */
    instr.reset(bld.sopc(aco_opcode::s_bitcmp1_b32, def_tmp_lo, op_tmp_lo, Operand::zero()).instr);

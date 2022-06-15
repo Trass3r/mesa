@@ -246,6 +246,12 @@ Intel driver environment variables
    if set to 1, true or yes, then the OpenGL implementation will
    default ``GL_BLACKHOLE_RENDER_INTEL`` to true, thus disabling any
    rendering.
+:envvar:`INTEL_COMPUTE_CLASS`
+   If set to 1, true or yes, then I915_ENGINE_CLASS_COMPUTE will be
+   supported. For OpenGL, iris will attempt to use a compute engine
+   for compute dispatches if one is detected. For Vulkan, anvil will
+   advertise support for a compute queue if a compute engine is
+   detected.
 :envvar:`INTEL_DEBUG`
    a comma-separated list of named flags, which do various things:
 
@@ -722,9 +728,9 @@ RADV driver environment variables
       enable wave32 for compute shaders (GFX10+)
    ``dccmsaa``
       enable DCC for MSAA images
-   ``force_emulate_rt``
-      forces ray-tracing to be emulated in software,
-      even if there is hardware support.
+   ``emulate_rt``
+      forces ray-tracing to be emulated in software on GFX10_3+ and enables
+      rt extensions with older hardware.
    ``gewave32``
       enable wave32 for vertex/tess/geometry shaders (GFX10+)
    ``localbos``
@@ -738,7 +744,7 @@ RADV driver environment variables
    ``nggc``
       enable NGG culling on GPUs where it's not enabled by default (GFX10.1 only).
    ``rt``
-      enable rt extensions whose implementation is still experimental.
+      enable rt pipelines whose implementation is still experimental.
    ``sam``
       enable optimizations to move more driver internal objects to VRAM.
    ``rtwave64``

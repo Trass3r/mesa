@@ -424,7 +424,7 @@ typedef struct nir_variable {
        *
        * \sa nir_variable_mode
        */
-      unsigned mode:15;
+      unsigned mode:16;
 
       /**
        * Is the variable read-only?
@@ -1531,6 +1531,7 @@ typedef struct {
    union {
       struct {
          nir_src index;
+         bool in_bounds;
       } arr;
 
       struct {
@@ -3228,6 +3229,15 @@ typedef enum {
  */
 typedef bool (*nir_instr_filter_cb)(const nir_instr *, const void *);
 
+/** A vectorization width callback
+ *
+ * Returns the maximum vectorization width per instruction.
+ * 0, if the instruction must not be modified.
+ *
+ * The vectorization width must be a power of 2.
+ */
+typedef uint8_t (*nir_vectorize_cb)(const nir_instr *, const void *);
+
 typedef struct nir_shader_compiler_options {
    bool lower_fdiv;
    bool lower_ffma16;
@@ -3447,6 +3457,12 @@ typedef struct nir_shader_compiler_options {
    bool lower_iadd_sat;
 
    /**
+    * Set if imul_32x16 and umul_32x16 should be lowered to simple
+    * arithmetic.
+    */
+   bool lower_mul_32x16;
+
+   /**
     * Should IO be re-vectorized?  Some scalar ISAs still operate on vec4's
     * for IO purposes and would prefer loads/stores be vectorized.
     */
@@ -3455,7 +3471,11 @@ typedef struct nir_shader_compiler_options {
    nir_instr_filter_cb lower_to_scalar_filter;
 
    /**
-    * Whether nir_opt_vectorize should only create 16-bit 2D vectors.
+    * Disables potentially harmful algebraic transformations for architectures
+    * with SIMD-within-a-register semantics.
+    *
+    * Note, to actually vectorize 16bit instructions, use nir_opt_vectorize()
+    * with a suitable callback function.
     */
    bool vectorize_vec2_16bit;
 
@@ -3583,6 +3603,13 @@ typedef struct nir_shader_compiler_options {
     */
    bool force_indirect_unrolling_sampler;
 
+   /* Some older drivers don't support GLSL versions with the concept of flat
+    * varyings and also don't support integers. This setting helps us avoid
+    * marking varyings as flat and potentially having them changed to ints via
+    * varying packing.
+    */
+   bool no_integers;
+
    /**
     * Specifies which type of indirectly accessed variables should force
     * loop unrolling.
@@ -3673,6 +3700,8 @@ typedef struct nir_shader {
    void *constant_data;
    /** Size of the constant data associated with the shader, in bytes */
    unsigned constant_data_size;
+
+   struct nir_xfb_info *xfb_info;
 
    unsigned printf_info_count;
    nir_printf_info *printf_info;
@@ -4340,7 +4369,8 @@ static inline bool should_print_nir(UNUSED nir_shader *shader) { return false; }
    if (should_print_nir(nir))                                        \
       printf("%s\n", #pass);                                         \
    if (pass(nir, ##__VA_ARGS__)) {                                   \
-      nir_validate_shader(nir, "after " #pass);                      \
+      nir_validate_shader(nir, "after " #pass " in " __FILE__);      \
+      UNUSED bool _;                                                 \
       progress = true;                                               \
       if (should_print_nir(nir))                                     \
          nir_print_shader(nir, stdout);                              \
@@ -4352,7 +4382,7 @@ static inline bool should_print_nir(UNUSED nir_shader *shader) { return false; }
    if (should_print_nir(nir))                                        \
       printf("%s\n", #pass);                                         \
    pass(nir, ##__VA_ARGS__);                                         \
-   nir_validate_shader(nir, "after " #pass);                         \
+   nir_validate_shader(nir, "after " #pass " in " __FILE__);         \
    if (should_print_nir(nir))                                        \
       nir_print_shader(nir, stdout);                                 \
 )
@@ -4584,7 +4614,9 @@ bool nir_lower_io(nir_shader *shader,
 bool nir_io_add_const_offset_to_base(nir_shader *nir, nir_variable_mode modes);
 
 void
-nir_lower_io_passes(nir_shader *nir, struct nir_xfb_info *xfb);
+nir_lower_io_passes(nir_shader *nir);
+
+bool nir_io_add_intrinsic_xfb_info(nir_shader *nir);
 
 bool
 nir_lower_vars_to_explicit_types(nir_shader *shader,
@@ -4778,10 +4810,13 @@ bool nir_lower_flrp(nir_shader *shader, unsigned lowering_mask,
 bool nir_scale_fdiv(nir_shader *shader);
 
 bool nir_lower_alu_to_scalar(nir_shader *shader, nir_instr_filter_cb cb, const void *data);
+bool nir_lower_alu_width(nir_shader *shader, nir_vectorize_cb cb, const void *data);
 bool nir_lower_bool_to_bitsize(nir_shader *shader);
 bool nir_lower_bool_to_float(nir_shader *shader);
 bool nir_lower_bool_to_int32(nir_shader *shader);
 bool nir_opt_simplify_convert_alu_types(nir_shader *shader);
+bool nir_lower_const_arrays_to_uniforms(nir_shader *shader,
+                                        unsigned max_uniform_components);
 bool nir_lower_convert_alu_types(nir_shader *shader,
                                  bool (*should_lower)(nir_intrinsic_instr *));
 bool nir_lower_constant_convert_alu_types(nir_shader *shader);
@@ -5066,6 +5101,11 @@ typedef struct nir_lower_tex_options {
     */
    bool lower_invalid_implicit_lod;
 
+   /* If true, round the layer component of the coordinates source to the nearest
+    * integer for all array ops.
+    */
+   bool lower_array_layer_round_even;
+
    /**
     * Payload data to be sent to callback / filter functions.
     */
@@ -5217,7 +5257,7 @@ typedef struct nir_lower_bitmap_options {
 
 void nir_lower_bitmap(nir_shader *shader, const nir_lower_bitmap_options *options);
 
-bool nir_lower_atomics_to_ssbo(nir_shader *shader);
+bool nir_lower_atomics_to_ssbo(nir_shader *shader, unsigned offset_align_state);
 
 typedef enum  {
    nir_lower_int_source_mods = 1 << 0,
@@ -5240,6 +5280,12 @@ typedef enum {
 } nir_lower_gs_intrinsics_flags;
 
 bool nir_lower_gs_intrinsics(nir_shader *shader, nir_lower_gs_intrinsics_flags options);
+
+typedef struct {
+   bool payload_to_shared_for_atomics : 1;
+} nir_lower_task_shader_options;
+
+bool nir_lower_task_shader(nir_shader *shader, nir_lower_task_shader_options options);
 
 typedef unsigned (*nir_lower_bit_size_callback)(const nir_instr *, void *);
 
@@ -5469,9 +5515,7 @@ bool nir_lower_undef_to_zero(nir_shader *shader);
 
 bool nir_opt_uniform_atomics(nir_shader *shader);
 
-typedef bool (*nir_opt_vectorize_cb)(const nir_instr *instr, void *data);
-
-bool nir_opt_vectorize(nir_shader *shader, nir_opt_vectorize_cb filter,
+bool nir_opt_vectorize(nir_shader *shader, nir_vectorize_cb filter,
                        void *data);
 
 bool nir_opt_conditional_discard(nir_shader *shader);

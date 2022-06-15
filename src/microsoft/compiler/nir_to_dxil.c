@@ -1471,8 +1471,11 @@ emit_entrypoint(struct ntd_context *ctx,
                 const struct dxil_mdnode *resources,
                 const struct dxil_mdnode *shader_props)
 {
+   char truncated_name[254] = { 0 };
+   strncpy(truncated_name, name, ARRAY_SIZE(truncated_name) - 1);
+
    const struct dxil_mdnode *func_md = dxil_get_metadata_func(&ctx->mod, func);
-   const struct dxil_mdnode *name_md = dxil_get_metadata_string(&ctx->mod, name);
+   const struct dxil_mdnode *name_md = dxil_get_metadata_string(&ctx->mod, truncated_name);
    const struct dxil_mdnode *nodes[] = {
       func_md,
       name_md,
@@ -2498,11 +2501,7 @@ emit_barrier_impl(struct ntd_context *ctx, nir_variable_mode modes, nir_scope ex
    if (execution_scope == NIR_SCOPE_WORKGROUP)
       flags |= DXIL_BARRIER_MODE_SYNC_THREAD_GROUP;
 
-   /* Currently vtn uses uniform to indicate image memory, which DXIL considers global */
-   if (modes & nir_var_uniform)
-      modes |= nir_var_mem_global;
-
-   if (modes & (nir_var_mem_ssbo | nir_var_mem_global)) {
+   if (modes & (nir_var_mem_ssbo | nir_var_mem_global | nir_var_image)) {
       if (mem_scope > NIR_SCOPE_WORKGROUP)
          flags |= DXIL_BARRIER_MODE_UAV_FENCE_GLOBAL;
       else
@@ -3175,6 +3174,32 @@ emit_store_output_via_intrinsic(struct ntd_context *ctx, nir_intrinsic_instr *in
          success &= dxil_emit_call_void(&ctx->mod, func, args, ARRAY_SIZE(args));
       }
    }
+
+   /* Make sure all SV_Position components are written, otherwise the DXIL
+    * validator complains.
+    */
+   bool is_sv_pos =
+      ctx->mod.shader_kind != DXIL_COMPUTE_SHADER &&
+      ctx->mod.shader_kind != DXIL_PIXEL_SHADER &&
+      var->data.location == VARYING_SLOT_POS;
+
+   if (is_sv_pos) {
+      const struct dxil_type *float_type = dxil_module_get_float_type(&ctx->mod, 32);
+      const struct dxil_value *float_undef = dxil_module_get_undef(&ctx->mod, float_type);
+      unsigned pos_wrmask = writemask << base_component;
+
+      for (unsigned i = 0; i < 4; ++i) {
+         if (!(BITFIELD_BIT(i) & pos_wrmask)) {
+            const struct dxil_value *args[] = {
+               opcode, output_id, row,
+               dxil_module_get_int8_const(&ctx->mod, i),
+               float_undef,
+            };
+            success &= dxil_emit_call_void(&ctx->mod, func, args, ARRAY_SIZE(args));
+         }
+      }
+   }
+
    return success;
 }
 
@@ -3645,8 +3670,12 @@ emit_image_load(struct ntd_context *ctx, nir_intrinsic_instr *intr)
       store_dest(ctx, &intr->dest, i, component, out_type);
    }
 
-   if (num_components > 1)
-      ctx->mod.feats.typed_uav_load_additional_formats = true;
+   /* FIXME: This flag should be set to true when the RWTexture is attached
+    * a vector, and we always declare a vec4 right now, so it should always be
+    * true. Might be worth reworking the dxil_module_get_res_type() to use a
+    * scalar when the image only has one component.
+    */
+   ctx->mod.feats.typed_uav_load_additional_formats = true;
 
    return true;
 }
@@ -4083,6 +4112,20 @@ emit_load_layer_id(struct ntd_context *ctx, nir_intrinsic_instr *intr)
 }
 
 static bool
+emit_load_sample_id(struct ntd_context *ctx, nir_intrinsic_instr *intr)
+{
+   assert(ctx->mod.info.has_per_sample_input ||
+          intr->intrinsic == nir_intrinsic_load_sample_id_no_per_sample);
+
+   if (ctx->mod.info.has_per_sample_input)
+      return emit_load_unary_external_function(ctx, intr, "dx.op.sampleIndex",
+                                               DXIL_INTR_SAMPLE_INDEX);
+
+   store_dest_value(ctx, &intr->dest, 0, dxil_module_get_int32_const(&ctx->mod, 0));
+   return true;
+}
+
+static bool
 emit_intrinsic(struct ntd_context *ctx, nir_intrinsic_instr *intr)
 {
    switch (intr->intrinsic) {
@@ -4117,8 +4160,8 @@ emit_intrinsic(struct ntd_context *ctx, nir_intrinsic_instr *intr)
       return emit_load_unary_external_function(ctx, intr, "dx.op.primitiveID",
                                                DXIL_INTR_PRIMITIVE_ID);
    case nir_intrinsic_load_sample_id:
-      return emit_load_unary_external_function(ctx, intr, "dx.op.sampleIndex",
-                                               DXIL_INTR_SAMPLE_INDEX);
+   case nir_intrinsic_load_sample_id_no_per_sample:
+      return emit_load_sample_id(ctx, intr);
    case nir_intrinsic_load_invocation_id:
       switch (ctx->mod.shader_kind) {
       case DXIL_HULL_SHADER:
@@ -4273,7 +4316,7 @@ emit_intrinsic(struct ntd_context *ctx, nir_intrinsic_instr *intr)
    case nir_intrinsic_load_workgroup_size:
    default:
       NIR_INSTR_UNSUPPORTED(&intr->instr);
-      assert("Unimplemented intrinsic instruction");
+      unreachable("Unimplemented intrinsic instruction");
       return false;
    }
 }
@@ -5382,7 +5425,6 @@ emit_module(struct ntd_context *ctx, const struct nir_to_dxil_options *opts)
    unsigned input_clip_size = ctx->mod.shader_kind == DXIL_PIXEL_SHADER ?
       ctx->shader->info.clip_distance_array_size : ctx->opts->input_clip_size;
    const struct dxil_mdnode *signatures = get_signatures(&ctx->mod, ctx->shader,
-                                                         ctx->opts->environment == DXIL_ENVIRONMENT_VULKAN,
                                                          input_clip_size);
 
    nir_foreach_function(func, ctx->shader) {
@@ -5685,6 +5727,7 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
    ctx->mod.major_version = 6;
    ctx->mod.minor_version = 1;
 
+   NIR_PASS_V(s, dxil_nir_lower_fquantize2f16);
    NIR_PASS_V(s, nir_lower_frexp);
    NIR_PASS_V(s, nir_lower_flrp, 16 | 32 | 64, true);
    NIR_PASS_V(s, nir_lower_io, nir_var_shader_in | nir_var_shader_out, type_size_vec4, nir_lower_io_lower_64bit_to_32);

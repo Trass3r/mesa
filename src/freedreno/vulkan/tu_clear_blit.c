@@ -1125,6 +1125,17 @@ r3d_run(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
 }
 
 static void
+r3d_run_vis(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
+{
+   tu_cs_emit_pkt7(cs, CP_DRAW_INDX_OFFSET, 3);
+   tu_cs_emit(cs, CP_DRAW_INDX_OFFSET_0_PRIM_TYPE(DI_PT_RECTLIST) |
+                  CP_DRAW_INDX_OFFSET_0_SOURCE_SELECT(DI_SRC_SEL_AUTO_INDEX) |
+                  CP_DRAW_INDX_OFFSET_0_VIS_CULL(USE_VISIBILITY));
+   tu_cs_emit(cs, 1); /* instance count */
+   tu_cs_emit(cs, 2); /* vertex count */
+}
+
+static void
 r3d_teardown(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
 {
    if (cmd->state.predication_active) {
@@ -2085,7 +2096,8 @@ resolve_sysmem(struct tu_cmd_buffer *cmd,
                uint32_t layer_mask,
                uint32_t layers,
                const VkRect2D *rect,
-               bool separate_ds)
+               bool src_separate_ds,
+               bool dst_separate_ds)
 {
    const struct blit_ops *ops = &r2d_ops;
 
@@ -2097,18 +2109,26 @@ resolve_sysmem(struct tu_cmd_buffer *cmd,
    ops->coords(cs, &rect->offset, &rect->offset, &rect->extent);
 
    for_each_layer(i, layer_mask, layers) {
-      if (separate_ds) {
+      if (src_separate_ds) {
          if (format == VK_FORMAT_D32_SFLOAT) {
             r2d_src_depth(cmd, cs, src, i, VK_FILTER_NEAREST);
-            ops->dst_depth(cs, dst, i);
          } else {
             r2d_src_stencil(cmd, cs, src, i, VK_FILTER_NEAREST);
-            ops->dst_stencil(cs, dst, i);
          }
       } else {
          ops->src(cmd, cs, &src->view, i, VK_FILTER_NEAREST);
+      }
+
+      if (dst_separate_ds) {
+         if (format == VK_FORMAT_D32_SFLOAT) {
+            ops->dst_depth(cs, dst, i);
+         } else {
+            ops->dst_stencil(cs, dst, i);
+         }
+      } else {
          ops->dst(cs, &dst->view, i);
       }
+
       ops->run(cmd, cs);
    }
 
@@ -2126,16 +2146,24 @@ tu_resolve_sysmem(struct tu_cmd_buffer *cmd,
                   uint32_t layers,
                   const VkRect2D *rect)
 {
-   assert(src->image->vk_format == dst->image->vk_format);
+   assert(src->image->vk_format == dst->image->vk_format ||
+          (vk_format_is_depth_or_stencil(src->image->vk_format) &&
+           vk_format_is_depth_or_stencil(dst->image->vk_format)));
 
-   if (dst->image->vk_format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+   bool src_separate_ds = src->image->vk_format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+   bool dst_separate_ds = dst->image->vk_format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+
+   if (dst_separate_ds) {
       resolve_sysmem(cmd, cs, VK_FORMAT_D32_SFLOAT,
-                     src, dst, layer_mask, layers, rect, true);
+                     src, dst, layer_mask, layers, rect,
+                     src_separate_ds, dst_separate_ds);
       resolve_sysmem(cmd, cs, VK_FORMAT_S8_UINT,
-                     src, dst, layer_mask, layers, rect, true);
+                     src, dst, layer_mask, layers, rect,
+                     src_separate_ds, dst_separate_ds);
    } else {
       resolve_sysmem(cmd, cs, dst->image->vk_format,
-                     src, dst, layer_mask, layers, rect, false);
+                     src, dst, layer_mask, layers, rect,
+                     src_separate_ds, dst_separate_ds);
    }
 }
 
@@ -2284,8 +2312,6 @@ tu_clear_sysmem_attachments(struct tu_cmd_buffer *cmd,
             s_clear_val = attachments[i].clearValue.depthStencil.stencil & 0xff;
          }
       }
-
-      cmd->state.attachment_cmd_clear[a] = true;
    }
 
    /* We may not know the multisample count if there are no attachments, so
@@ -2387,7 +2413,7 @@ tu_clear_sysmem_attachments(struct tu_cmd_buffer *cmd,
             rects[i].rect.offset.y + rects[i].rect.extent.height,
             z_clear_val, 1.0f,
          });
-         r3d_run(cmd, cs);
+         r3d_run_vis(cmd, cs);
       }
    }
 
@@ -2559,8 +2585,6 @@ tu_clear_gmem_attachments(struct tu_cmd_buffer *cmd,
          if (a == VK_ATTACHMENT_UNUSED)
                continue;
 
-         cmd->state.attachment_cmd_clear[a] = true;
-
          tu_emit_clear_gmem_attachment(cmd, cs, a, attachments[j].aspectMask,
                                        &attachments[j].clearValue);
       }
@@ -2592,19 +2616,36 @@ tu_CmdClearAttachments(VkCommandBuffer commandBuffer,
    /* vkCmdClearAttachments is supposed to respect the predicate if active.
     * The easiest way to do this is to always use the 3d path, which always
     * works even with GMEM because it's just a simple draw using the existing
-    * attachment state. However it seems that IGNORE_VISIBILITY draws must be
-    * skipped in the binning pass, since otherwise they produce binning data
-    * which isn't consumed and leads to the wrong binning data being read, so
-    * condition on GMEM | SYSMEM.
+    * attachment state.
     */
    if (cmd->state.predication_active) {
-      tu_cond_exec_start(cs, CP_COND_EXEC_0_RENDER_MODE_GMEM |
-                             CP_COND_EXEC_0_RENDER_MODE_SYSMEM);
       tu_clear_sysmem_attachments(cmd, attachmentCount, pAttachments, rectCount, pRects);
-      tu_cond_exec_end(cs);
       return;
    }
 
+   /* If we could skip tile load/stores based on any draws intersecting them at
+    * binning time, then emit the clear as a 3D draw so that it contributes to
+    * that visibility.
+   */
+   const struct tu_subpass *subpass = cmd->state.subpass;
+   for (uint32_t i = 0; i < attachmentCount; i++) {
+      uint32_t a;
+      if (pAttachments[i].aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) {
+         uint32_t c = pAttachments[i].colorAttachment;
+         a = subpass->color_attachments[c].attachment;
+      } else {
+         a = subpass->depth_stencil_attachment.attachment;
+      }
+      if (a != VK_ATTACHMENT_UNUSED) {
+         const struct tu_render_pass_attachment *att = &cmd->state.pass->attachments[a];
+         if (att->cond_load_allowed || att->cond_store_allowed) {
+            tu_clear_sysmem_attachments(cmd, attachmentCount, pAttachments, rectCount, pRects);
+            return;
+         }
+      }
+   }
+
+   /* Otherwise, emit 2D blits for gmem rendering. */
    tu_cond_exec_start(cs, CP_COND_EXEC_0_RENDER_MODE_GMEM);
    tu_clear_gmem_attachments(cmd, attachmentCount, pAttachments, rectCount, pRects);
    tu_cond_exec_end(cs);
@@ -2883,10 +2924,7 @@ tu_load_gmem_attachment(struct tu_cmd_buffer *cmd,
     * To simplify conditions treat partially cleared separate DS as fully
     * cleared and don't emit cond_exec.
     */
-   bool cond_exec = cond_exec_allowed &&
-                    !attachment->clear_mask &&
-                    !cmd->state.attachment_cmd_clear[a] &&
-                    !attachment->will_be_resolved;
+   bool cond_exec = cond_exec_allowed && attachment->cond_load_allowed;
    if (cond_exec)
       tu_begin_load_store_cond_exec(cmd, cs, true);
 
@@ -3013,11 +3051,10 @@ tu_store_gmem_attachment(struct tu_cmd_buffer *cmd,
    if (!dst->store && !dst->store_stencil)
       return;
 
-   bool was_cleared = src->clear_mask || cmd->state.attachment_cmd_clear[a];
    /* Unconditional store should happen only if attachment was cleared,
     * which could have happened either by load_op or via vkCmdClearAttachments.
     */
-   bool cond_exec = cond_exec_allowed && !was_cleared;
+   bool cond_exec = cond_exec_allowed && src->cond_store_allowed;
    if (cond_exec) {
       tu_begin_load_store_cond_exec(cmd, cs, false);
    }

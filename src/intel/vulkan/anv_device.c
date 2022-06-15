@@ -69,6 +69,7 @@ static const driOptionDescription anv_dri_options[] = {
       DRI_CONF_VK_X11_STRICT_IMAGE_COUNT(false)
       DRI_CONF_VK_XWAYLAND_WAIT_READY(true)
       DRI_CONF_ANV_ASSUME_FULL_SUBGROUPS(false)
+      DRI_CONF_ANV_SAMPLE_MASK_OUT_OPENGL_BEHAVIOUR(false)
    DRI_CONF_SECTION_END
 
    DRI_CONF_SECTION_DEBUG
@@ -253,6 +254,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_workgroup_memory_explicit_layout  = true,
       .KHR_zero_initialize_workgroup_memory  = true,
       .EXT_4444_formats                      = true,
+      .EXT_border_color_swizzle              = device->info.ver >= 8,
       .EXT_buffer_device_address             = device->has_a64_buffer_access,
       .EXT_calibrated_timestamps             = device->has_reg_timestamp,
       .EXT_color_write_enable                = true,
@@ -279,10 +281,12 @@ get_device_extensions(const struct anv_physical_device *device,
       .EXT_image_2d_view_of_3d               = true,
       .EXT_image_robustness                  = true,
       .EXT_image_drm_format_modifier         = true,
+      .EXT_image_view_min_lod                = true,
       .EXT_index_type_uint8                  = true,
       .EXT_inline_uniform_block              = true,
       .EXT_line_rasterization                = true,
       .EXT_memory_budget                     = device->sys.available,
+      .EXT_non_seamless_cube_map             = true,
       .EXT_pci_bus_info                      = true,
       .EXT_physical_device_drm               = true,
       .EXT_pipeline_creation_cache_control   = true,
@@ -697,6 +701,11 @@ anv_physical_device_init_queue_families(struct anv_physical_device *pdevice)
                                  I915_ENGINE_CLASS_RENDER);
       int g_count = 0;
       int c_count = 0;
+      if (env_var_as_boolean("INTEL_COMPUTE_CLASS", false))
+         c_count = intel_gem_count_engines(pdevice->engine_info,
+                                           I915_ENGINE_CLASS_COMPUTE);
+      enum drm_i915_gem_engine_class compute_class =
+         c_count < 1 ? I915_ENGINE_CLASS_RENDER : I915_ENGINE_CLASS_COMPUTE;
 
       anv_override_engine_counts(&gc_count, &g_count, &c_count);
 
@@ -722,7 +731,7 @@ anv_physical_device_init_queue_families(struct anv_physical_device *pdevice)
             .queueFlags = VK_QUEUE_COMPUTE_BIT |
                           VK_QUEUE_TRANSFER_BIT,
             .queueCount = c_count,
-            .engine_class = I915_ENGINE_CLASS_RENDER,
+            .engine_class = compute_class,
          };
       }
       /* Increase count below when other families are added as a reminder to
@@ -1107,6 +1116,8 @@ anv_init_dri_options(struct anv_instance *instance)
             driQueryOptionb(&instance->dri_options, "anv_assume_full_subgroups");
     instance->limit_trig_input_range =
             driQueryOptionb(&instance->dri_options, "limit_trig_input_range");
+    instance->sample_mask_out_opengl_behaviour =
+            driQueryOptionb(&instance->dri_options, "anv_sample_mask_out_opengl_behaviour");
 }
 
 VkResult anv_CreateInstance(
@@ -1507,6 +1518,13 @@ void anv_GetPhysicalDeviceFeatures2(
          break;
       }
 
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BORDER_COLOR_SWIZZLE_FEATURES_EXT: {
+         VkPhysicalDeviceBorderColorSwizzleFeaturesEXT *features =
+            (VkPhysicalDeviceBorderColorSwizzleFeaturesEXT *)ext;
+         features->borderColorSwizzle = true;
+         features->borderColorSwizzleFromImage = true;
+         break;
+      }
 
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COLOR_WRITE_ENABLE_FEATURES_EXT: {
          VkPhysicalDeviceColorWriteEnableFeaturesEXT *features =
@@ -1586,6 +1604,13 @@ void anv_GetPhysicalDeviceFeatures2(
             pdevice->info.has_coarse_pixel_primitive_and_cb;
          features->attachmentFragmentShadingRate =
             pdevice->info.has_coarse_pixel_primitive_and_cb;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT: {
+         VkPhysicalDeviceImageViewMinLodFeaturesEXT *features =
+            (VkPhysicalDeviceImageViewMinLodFeaturesEXT *)ext;
+         features->minLod = true;
          break;
       }
 
@@ -1809,6 +1834,13 @@ void anv_GetPhysicalDeviceFeatures2(
          break;
       }
 
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_NON_SEAMLESS_CUBE_MAP_FEATURES_EXT : {
+         VkPhysicalDeviceNonSeamlessCubeMapFeaturesEXT *features =
+            (VkPhysicalDeviceNonSeamlessCubeMapFeaturesEXT *)ext;
+         features->nonSeamlessCubeMap = true;
+         break;
+      }
+
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVE_TOPOLOGY_LIST_RESTART_FEATURES_EXT: {
          VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT *features =
             (VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT *)ext;
@@ -1992,7 +2024,7 @@ void anv_GetPhysicalDeviceProperties(
        * Since the Windows driver does the same, it's probably fair to assume
        * that no one needs more than this.
        */
-      .lineWidthRange                           = { 0.0, 7.9921875 },
+      .lineWidthRange                           = { 0.0, devinfo->ver >= 9 ? 8.0 : 7.9921875 },
       .pointSizeGranularity                     = (1.0 / 8.0),
       .lineWidthGranularity                     = (1.0 / 128.0),
       .strictLines                              = false,
@@ -3459,14 +3491,26 @@ VkResult anv_CreateDevice(
       goto fail_trivial_batch_bo_and_scratch_pool;
    }
 
-   result = anv_device_init_rt_shaders(device);
-   if (result != VK_SUCCESS)
-      goto fail_default_pipeline_cache;
-
-   if (!anv_device_init_blorp(device)) {
+   /* Internal shaders need their own pipeline cache because, unlike the rest
+    * of ANV, it won't work at all without the cache. It depends on it for
+    * shaders to remain resident while it runs. Therefore, we need a special
+    * cache just for BLORP/RT that's forced to always be enabled.
+    */
+   pcc_info.force_enable = true;
+   device->internal_cache =
+      vk_pipeline_cache_create(&device->vk, &pcc_info, NULL);
+   if (device->internal_cache == NULL) {
       result = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
-      goto fail_rt_shaders;
+      goto fail_default_pipeline_cache;
    }
+
+   result = anv_device_init_rt_shaders(device);
+   if (result != VK_SUCCESS) {
+      result = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+      goto fail_internal_cache;
+   }
+
+   anv_device_init_blorp(device);
 
    anv_device_init_border_colors(device);
 
@@ -3478,8 +3522,8 @@ VkResult anv_CreateDevice(
 
    return VK_SUCCESS;
 
- fail_rt_shaders:
-   anv_device_finish_rt_shaders(device);
+ fail_internal_cache:
+   vk_pipeline_cache_destroy(device->internal_cache, NULL);
  fail_default_pipeline_cache:
    vk_pipeline_cache_destroy(device->default_pipeline_cache, NULL);
  fail_trivial_batch_bo_and_scratch_pool:
@@ -3553,6 +3597,7 @@ void anv_DestroyDevice(
 
    anv_device_finish_rt_shaders(device);
 
+   vk_pipeline_cache_destroy(device->internal_cache, NULL);
    vk_pipeline_cache_destroy(device->default_pipeline_cache, NULL);
 
 #ifdef HAVE_VALGRIND
@@ -4262,7 +4307,7 @@ anv_bind_buffer_memory(const VkBindBufferMemoryInfo *pBindInfo)
 
    if (mem) {
       assert(pBindInfo->memoryOffset < mem->bo->size);
-      assert(mem->bo->size - pBindInfo->memoryOffset >= buffer->size);
+      assert(mem->bo->size - pBindInfo->memoryOffset >= buffer->vk.size);
       buffer->address = (struct anv_address) {
          .bo = mem->bo,
          .offset = pBindInfo->memoryOffset,
@@ -4437,8 +4482,8 @@ void anv_GetBufferMemoryRequirements2(
    ANV_FROM_HANDLE(anv_buffer, buffer, pInfo->buffer);
 
    anv_get_buffer_memory_requirements(device,
-                                      buffer->size,
-                                      buffer->usage,
+                                      buffer->vk.size,
+                                      buffer->vk.usage,
                                       pMemoryRequirements);
 }
 
@@ -4472,16 +4517,11 @@ VkResult anv_CreateBuffer(
    if (pCreateInfo->size > device->physical->gtt_size)
       return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
 
-   assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO);
-
-   buffer = vk_object_alloc(&device->vk, pAllocator, sizeof(*buffer),
-                            VK_OBJECT_TYPE_BUFFER);
+   buffer = vk_buffer_create(&device->vk, pCreateInfo,
+                             pAllocator, sizeof(*buffer));
    if (buffer == NULL)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   buffer->create_flags = pCreateInfo->flags;
-   buffer->size = pCreateInfo->size;
-   buffer->usage = pCreateInfo->usage;
    buffer->address = ANV_NULL_ADDRESS;
 
    *pBuffer = anv_buffer_to_handle(buffer);
@@ -4500,7 +4540,7 @@ void anv_DestroyBuffer(
    if (!buffer)
       return;
 
-   vk_object_free(&device->vk, pAllocator, buffer);
+   vk_buffer_destroy(&device->vk, pAllocator, &buffer->vk);
 }
 
 VkDeviceAddress anv_GetBufferDeviceAddress(

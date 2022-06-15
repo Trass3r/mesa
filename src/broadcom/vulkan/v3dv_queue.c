@@ -488,10 +488,24 @@ set_in_syncs(struct v3dv_queue *queue,
    if (queue->last_job_syncs.first[queue_sync])
       n_syncs = sync_info->wait_count;
 
-   /* If the serialize flag is set, this job waits for completion of all GPU
-    * jobs submitted in any queue V3DV_QUEUE_(CL/TFU/CSD) before running.
+   /* If the serialize flag is set the job needs to be serialized in the
+    * corresponding queues. Notice that we may implement transfer operations
+    * as both CL or TFU jobs.
+    *
+    * FIXME: maybe we could track more precisely if the source of a transfer
+    * barrier is a CL and/or a TFU job.
     */
-   *count = n_syncs + (job->serialize ? 3 : 0);
+   bool sync_csd  = job->serialize & V3DV_BARRIER_COMPUTE_BIT;
+   bool sync_tfu  = job->serialize & V3DV_BARRIER_TRANSFER_BIT;
+   bool sync_cl   = job->serialize & (V3DV_BARRIER_GRAPHICS_BIT |
+                                      V3DV_BARRIER_TRANSFER_BIT);
+   *count = n_syncs;
+   if (sync_cl)
+      (*count)++;
+   if (sync_tfu)
+      (*count)++;
+   if (sync_csd)
+      (*count)++;
 
    if (!*count)
       return NULL;
@@ -508,11 +522,16 @@ set_in_syncs(struct v3dv_queue *queue,
          vk_sync_as_drm_syncobj(sync_info->waits[i].sync)->syncobj;
    }
 
-   if (job->serialize) {
-      for (int i = 0; i < 3; i++)
-         syncs[n_syncs + i].handle = queue->last_job_syncs.syncs[i];
-   }
+   if (sync_cl)
+      syncs[n_syncs++].handle = queue->last_job_syncs.syncs[V3DV_QUEUE_CL];
 
+   if (sync_csd)
+      syncs[n_syncs++].handle = queue->last_job_syncs.syncs[V3DV_QUEUE_CSD];
+
+   if (sync_tfu)
+      syncs[n_syncs++].handle = queue->last_job_syncs.syncs[V3DV_QUEUE_TFU];
+
+   assert(n_syncs == *count);
    return syncs;
 }
 
@@ -887,9 +906,24 @@ queue_create_noop_job(struct v3dv_queue *queue)
     * order requirements, which basically require that signal operations occur
     * in submission order.
     */
-   queue->noop_job->serialize = true;
+   queue->noop_job->serialize = V3DV_BARRIER_ALL;
 
    return VK_SUCCESS;
+}
+
+static VkResult
+queue_submit_noop_job(struct v3dv_queue *queue,
+                      struct v3dv_submit_sync_info *sync_info,
+                      bool signal_syncs)
+{
+   if (!queue->noop_job) {
+      VkResult result = queue_create_noop_job(queue);
+      if (result != VK_SUCCESS)
+         return result;
+   }
+
+   assert(queue->noop_job);
+   return queue_handle_job(queue, queue->noop_job, sync_info, signal_syncs);
 }
 
 VkResult
@@ -923,6 +957,17 @@ v3dv_queue_driver_submit(struct vk_queue *vk_queue,
          if (result != VK_SUCCESS)
             return result;
       }
+
+      /* If the command buffer ends with a barrier we need to consume it now.
+       *
+       * FIXME: this will drain all hw queues. Instead, we could use the pending
+       * barrier state to limit the queues we serialize against.
+       */
+      if (cmd_buffer->state.barrier.dst_mask) {
+         result = queue_submit_noop_job(queue, &sync_info, false);
+         if (result != VK_SUCCESS)
+            return result;
+      }
    }
 
    /* Finish by submitting a no-op job that synchronizes across all queues.
@@ -931,12 +976,7 @@ v3dv_queue_driver_submit(struct vk_queue *vk_queue,
     * requirements.
     */
    if (submit->signal_count > 0) {
-      if (!queue->noop_job) {
-         result = queue_create_noop_job(queue);
-         if (result != VK_SUCCESS)
-            return result;
-      }
-      result = queue_handle_job(queue, queue->noop_job, &sync_info, true);
+      result = queue_submit_noop_job(queue, &sync_info, true);
       if (result != VK_SUCCESS)
          return result;
    }

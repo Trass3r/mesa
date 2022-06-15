@@ -72,7 +72,8 @@ CONSOLE_LOG_COLOR_RESET = "\x1b[0m"
 
 
 def print_log(msg):
-    print("{}: {}".format(datetime.now(), msg))
+    # Reset color from timestamp, since `msg` can tint the terminal color
+    print(f"{CONSOLE_LOG_COLOR_RESET}{datetime.now()}: {msg}")
 
 
 def fatal_err(msg):
@@ -370,9 +371,43 @@ def show_job_data(job):
         print("{}\t: {}".format(field, value))
 
 
+def fix_lava_color_log(line):
+    """This function is a temporary solution for the color escape codes mangling
+    problem. There is some problem in message passing between the LAVA
+    dispatcher and the device under test (DUT). Here \x1b character is missing
+    before `[:digit::digit:?:digit:?m` ANSI TTY color codes, or the more
+    complicated ones with number values for text format before background and
+    foreground colors.
+    When this problem is fixed on the LAVA side, one should remove this function.
+    """
+    line["msg"] = re.sub(r"(\[(\d+;){0,2}\d{1,3}m)", "\x1b" + r"\1", line["msg"])
+
+
+def fix_lava_gitlab_section_log(line):
+    """This function is a temporary solution for the Gitlab section markers
+    mangling problem. Gitlab parses the following lines to define a collapsible
+    gitlab section in their log:
+    - \x1b[0Ksection_start:timestamp:section_id[collapsible=true/false]\r\x1b[0Ksection_header
+    - \x1b[0Ksection_end:timestamp:section_id\r\x1b[0K
+    There is some problem in message passing between the LAVA dispatcher and the
+    device under test (DUT), that digests \x1b and \r control characters
+    incorrectly. When this problem is fixed on the LAVA side, one should remove
+    this function.
+    """
+    if match := re.match(r"\[0K(section_\w+):(\d+):(\S+)\[0K([\S ]+)?", line["msg"]):
+        marker, timestamp, id_collapsible, header = match.groups()
+        # The above regex serves for both section start and end lines.
+        # When the header is None, it means we are dealing with `section_end` line
+        header = header or ""
+        line["msg"] = f"\x1b[0K{marker}:{timestamp}:{id_collapsible}\r\x1b[0K{header}"
+
+
 def parse_lava_lines(new_lines) -> list[str]:
     parsed_lines: list[str] = []
     for line in new_lines:
+        prefix = ""
+        suffix = ""
+
         if line["lvl"] in ["results", "feedback"]:
             continue
         elif line["lvl"] in ["warning", "error"]:
@@ -381,9 +416,10 @@ def parse_lava_lines(new_lines) -> list[str]:
         elif line["lvl"] == "input":
             prefix = "$ "
             suffix = ""
-        else:
-            prefix = ""
-            suffix = ""
+        elif line["lvl"] == "target":
+            fix_lava_color_log(line)
+            fix_lava_gitlab_section_log(line)
+
         line = f'{prefix}{line["msg"]}{suffix}'
         parsed_lines.append(line)
 

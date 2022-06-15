@@ -604,10 +604,11 @@ struct si_screen {
    /* Texture filter settings. */
    int force_aniso; /* -1 = disabled */
 
-   /* Auxiliary context. Mainly used to initialize resources.
-    * It must be locked prior to using and flushed before unlocking. */
-   struct pipe_context *aux_context;
-   simple_mtx_t aux_context_lock;
+   unsigned max_texel_buffer_elements;
+
+   /* Auxiliary context. Mainly used to initialize resources. */
+   void *aux_context;
+   mtx_t aux_context_lock;
 
    /* Async compute context for DRI_PRIME copies. */
    struct pipe_context *async_compute_context;
@@ -629,6 +630,7 @@ struct si_screen {
    /* GPU load thread. */
    simple_mtx_t gpu_load_mutex;
    thrd_t gpu_load_thread;
+   bool gpu_load_thread_created;
    union si_mmio_counters mmio_counters;
    volatile unsigned gpu_load_stop_thread; /* bool */
 
@@ -708,6 +710,11 @@ struct si_screen {
    struct util_vertex_state_cache vertex_state_cache;
 
    struct si_resource *attribute_ring;
+
+   /* NGG streamout. */
+   simple_mtx_t gds_mutex;
+   struct pb_buffer *gds;
+   struct pb_buffer *gds_oa;
 };
 
 struct si_sampler_view {
@@ -993,7 +1000,6 @@ struct si_context {
    struct util_debug_callback debug;
    struct ac_llvm_compiler compiler; /* only non-threaded compilation */
    struct si_shader_ctx_state fixed_func_tcs_shader;
-   /* Offset 0: EOP flush number; Offset 4: GDS prim restart counter */
    struct si_resource *wait_mem_scratch;
    struct si_resource *wait_mem_scratch_tmz;
    unsigned wait_mem_number;
@@ -1001,6 +1007,7 @@ struct si_context {
 
    bool blitter_running;
    bool in_update_ps_colorbuf0_slot;
+   bool in_dcc_decompress;
    bool is_noop:1;
    bool has_graphics:1;
    bool gfx_flush_in_progress : 1;
@@ -1017,10 +1024,6 @@ struct si_context {
    unsigned flags; /* flush flags */
    /* Current unaccounted memory usage. */
    uint32_t memory_usage_kb;
-
-   /* NGG streamout. */
-   struct pb_buffer *gds;
-   struct pb_buffer *gds_oa;
 
    /* Atoms (direct states). */
    union si_state_atoms atoms;
@@ -1162,10 +1165,10 @@ struct si_context {
    unsigned last_prim;
    unsigned last_multi_vgt_param;
    unsigned last_gs_out_prim;
-   unsigned current_vs_state;
+   unsigned current_vs_state; /* all VS bits including LS bits */
+   unsigned current_gs_state; /* only GS and NGG bits */
    unsigned last_vs_state;
-   bool current_gs_stats_counter_emul;
-   bool last_gs_stats_counter_emul;
+   unsigned last_gs_state;
    enum pipe_prim_type current_rast_prim; /* primitive type after TES, GS */
 
    struct si_small_prim_cull_info last_small_prim_cull_info;
@@ -1523,6 +1526,8 @@ void si_init_compute_functions(struct si_context *sctx);
 /* si_pipe.c */
 bool si_init_compiler(struct si_screen *sscreen, struct ac_llvm_compiler *compiler);
 void si_init_aux_async_compute_ctx(struct si_screen *sscreen);
+struct si_context* si_get_aux_context(struct si_screen *sscreen);
+void si_put_aux_context_flush(struct si_screen *sscreen);
 
 /* si_perfcounters.c */
 void si_init_perfcounters(struct si_screen *screen);

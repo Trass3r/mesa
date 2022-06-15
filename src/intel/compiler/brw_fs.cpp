@@ -2550,9 +2550,24 @@ fs_visitor::opt_algebraic()
       switch (inst->opcode) {
       case BRW_OPCODE_MOV:
          if (!devinfo->has_64bit_float &&
-             !devinfo->has_64bit_int &&
-             (inst->dst.type == BRW_REGISTER_TYPE_DF ||
-              inst->dst.type == BRW_REGISTER_TYPE_UQ ||
+             inst->dst.type == BRW_REGISTER_TYPE_DF) {
+            assert(inst->dst.type == inst->src[0].type);
+            assert(!inst->saturate);
+            assert(!inst->src[0].abs);
+            assert(!inst->src[0].negate);
+            const brw::fs_builder ibld(this, block, inst);
+
+            ibld.MOV(subscript(inst->dst, BRW_REGISTER_TYPE_F, 1),
+                     subscript(inst->src[0], BRW_REGISTER_TYPE_F, 1));
+            ibld.MOV(subscript(inst->dst, BRW_REGISTER_TYPE_F, 0),
+                     subscript(inst->src[0], BRW_REGISTER_TYPE_F, 0));
+
+            inst->remove(block);
+            progress = true;
+         }
+
+         if (!devinfo->has_64bit_int &&
+             (inst->dst.type == BRW_REGISTER_TYPE_UQ ||
               inst->dst.type == BRW_REGISTER_TYPE_Q)) {
             assert(inst->dst.type == inst->src[0].type);
             assert(!inst->saturate);
@@ -3217,7 +3232,7 @@ fs_visitor::eliminate_find_live_channel()
          /* This can potentially make control flow non-uniform until the end
           * of the program.
           */
-         return progress;
+         goto out;
 
       case SHADER_OPCODE_FIND_LIVE_CHANNEL:
          if (depth == 0) {
@@ -3234,6 +3249,7 @@ fs_visitor::eliminate_find_live_channel()
       }
    }
 
+out:
    if (progress)
       invalidate_analysis(DEPENDENCY_INSTRUCTION_DETAIL);
 
@@ -6167,12 +6183,22 @@ static fs_reg
 emit_a64_oword_block_header(const fs_builder &bld, const fs_reg &addr)
 {
    const fs_builder ubld = bld.exec_all().group(8, 0);
+
+   assert(type_sz(addr.type) == 8 && addr.stride == 0);
+
+   fs_reg expanded_addr = addr;
+   if (addr.file == UNIFORM) {
+      /* We can't do stride 1 with the UNIFORM file, it requires stride 0 */
+      expanded_addr = ubld.vgrf(BRW_REGISTER_TYPE_UQ);
+      expanded_addr.stride = 0;
+      ubld.MOV(expanded_addr, addr);
+   }
+
    fs_reg header = ubld.vgrf(BRW_REGISTER_TYPE_UD);
    ubld.MOV(header, brw_imm_ud(0));
 
    /* Use a 2-wide MOV to fill out the address */
-   assert(type_sz(addr.type) == 8 && addr.stride == 0);
-   fs_reg addr_vec2 = addr;
+   fs_reg addr_vec2 = expanded_addr;
    addr_vec2.type = BRW_REGISTER_TYPE_UD;
    addr_vec2.stride = 1;
    ubld.group(2, 0).MOV(header, addr_vec2);
@@ -9773,6 +9799,7 @@ brw_nir_populate_wm_prog_data(const nir_shader *shader,
                           key->emit_alpha_test;
    prog_data->uses_omask = !key->ignore_sample_mask_out &&
       (shader->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK));
+   prog_data->color_outputs_written = key->color_outputs_valid;
    prog_data->computed_depth_mode = computed_depth_mode(shader);
    prog_data->computed_stencil =
       shader->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_STENCIL);
@@ -9821,6 +9848,14 @@ brw_nir_populate_wm_prog_data(const nir_shader *shader,
       !prog_data->uses_sample_mask &&
       (prog_data->computed_depth_mode == BRW_PSCDEPTH_OFF) &&
       !prog_data->computed_stencil;
+
+   /* We choose to always enable VMask prior to XeHP, as it would cause
+    * us to lose out on the eliminate_find_live_channel() optimization.
+    */
+   prog_data->uses_vmask = devinfo->verx10 < 125 ||
+                           shader->info.fs.needs_quad_helper_invocations ||
+                           shader->info.fs.needs_all_helper_invocations ||
+                           prog_data->per_coarse_pixel_dispatch;
 
    prog_data->uses_src_w =
       BITSET_TEST(shader->info.system_values_read, SYSTEM_VALUE_FRAG_COORD);
@@ -10567,13 +10602,15 @@ static UNUSED void
 brw_fs_test_dispatch_packing(const fs_builder &bld)
 {
    const gl_shader_stage stage = bld.shader->stage;
+   const bool uses_vmask =
+      stage == MESA_SHADER_FRAGMENT &&
+      brw_wm_prog_data(bld.shader->stage_prog_data)->uses_vmask;
 
    if (brw_stage_has_packed_dispatch(bld.shader->devinfo, stage,
                                      bld.shader->stage_prog_data)) {
       const fs_builder ubld = bld.exec_all().group(1, 0);
       const fs_reg tmp = component(bld.vgrf(BRW_REGISTER_TYPE_UD), 0);
-      const fs_reg mask = (stage == MESA_SHADER_FRAGMENT ? brw_vmask_reg() :
-                           brw_dmask_reg());
+      const fs_reg mask = uses_vmask ? brw_vmask_reg() : brw_dmask_reg();
 
       ubld.ADD(tmp, mask, brw_imm_ud(1));
       ubld.AND(tmp, mask, tmp);

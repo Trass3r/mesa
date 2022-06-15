@@ -1453,6 +1453,8 @@ optimizations.extend([
    # Packing and then unpacking does nothing
    (('unpack_64_2x32_split_x', ('pack_64_2x32_split', a, b)), a),
    (('unpack_64_2x32_split_y', ('pack_64_2x32_split', a, b)), b),
+   (('unpack_64_2x32_split_x', ('pack_64_2x32', a)), 'a.x'),
+   (('unpack_64_2x32_split_y', ('pack_64_2x32', a)), 'a.y'),
    (('unpack_64_2x32', ('pack_64_2x32_split', a, b)), ('vec2', a, b)),
    (('unpack_64_2x32', ('pack_64_2x32', a)), a),
    (('unpack_double_2x32_dxil', ('pack_double_2x32_dxil', a)), a),
@@ -1682,6 +1684,9 @@ optimizations.extend([
    (('uhadd@64', a, b), ('iadd', ('iand', a, b), ('ushr', ('ixor', a, b), 1)), 'options->lower_hadd64 || (options->lower_int64_options & nir_lower_iadd64) != 0'),
    (('irhadd@64', a, b), ('isub', ('ior', a, b), ('ishr', ('ixor', a, b), 1)), 'options->lower_hadd64 || (options->lower_int64_options & nir_lower_iadd64) != 0'),
    (('urhadd@64', a, b), ('isub', ('ior', a, b), ('ushr', ('ixor', a, b), 1)), 'options->lower_hadd64 || (options->lower_int64_options & nir_lower_iadd64) != 0'),
+
+   (('imul_32x16', a, b), ('imul', a, ('extract_i16', b, 0)), 'options->lower_mul_32x16'),
+   (('umul_32x16', a, b), ('imul', a, ('extract_u16', b, 0)), 'options->lower_mul_32x16'),
 
    (('uadd_sat@64', a, b), ('bcsel', ('ult', ('iadd', a, b), a), -1, ('iadd', a, b)), 'options->lower_uadd_sat || (options->lower_int64_options & nir_lower_iadd64) != 0'),
    (('uadd_sat', a, b), ('bcsel', ('ult', ('iadd', a, b), a), -1, ('iadd', a, b)), 'options->lower_uadd_sat'),

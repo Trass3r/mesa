@@ -41,6 +41,8 @@
 #include "hwdef/rogue_hw_utils.h"
 #include "pvr_bo.h"
 #include "pvr_csb.h"
+#include "pvr_csb_enum_helpers.h"
+#include "pvr_debug.h"
 #include "pvr_device_info.h"
 #include "pvr_job_render.h"
 #include "pvr_limits.h"
@@ -160,6 +162,8 @@ VkResult pvr_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
       vk_free(pAllocator, instance);
       return vk_error(NULL, result);
    }
+
+   pvr_process_debug_variable();
 
    instance->physical_devices_count = -1;
 
@@ -1001,6 +1005,7 @@ static VkResult pvr_device_init_compute_fence_program(struct pvr_device *device)
  * pvr_srv_setup_static_pixel_event_program().
  */
 static void pvr_device_get_pixel_event_pds_program_data_size(
+   const struct pvr_device_info *dev_info,
    uint32_t *const data_size_in_dwords_out)
 {
    struct pvr_pds_event_program program = {
@@ -1008,7 +1013,7 @@ static void pvr_device_get_pixel_event_pds_program_data_size(
       .num_emit_word_pairs = 0,
    };
 
-   pvr_pds_set_sizes_pixel_event(&program);
+   pvr_pds_set_sizes_pixel_event(&program, dev_info);
 
    *data_size_in_dwords_out = program.data_size;
 }
@@ -1177,6 +1182,7 @@ VkResult pvr_CreateDevice(VkPhysicalDevice physicalDevice,
     * on each kick.
     */
    pvr_device_get_pixel_event_pds_program_data_size(
+      &pdevice->dev_info,
       &device->pixel_event_data_size_in_dwords);
 
    device->global_queue_job_count = 0;
@@ -2080,6 +2086,9 @@ VkResult pvr_CreateSampler(VkDevice _device,
    float min_lod;
    float max_lod;
 
+   STATIC_ASSERT(sizeof(((union pvr_sampler_descriptor *)NULL)->data) ==
+                 sizeof(((union pvr_sampler_descriptor *)NULL)->words));
+
    sampler = vk_object_alloc(&device->vk,
                              pAllocator,
                              sizeof(*sampler),
@@ -2113,7 +2122,18 @@ VkResult pvr_CreateSampler(VkDevice _device,
       }
    }
 
-   pvr_csb_pack (&sampler->sampler_word, TEXSTATE_SAMPLER, word) {
+   if (pCreateInfo->compareEnable) {
+      sampler->descriptor.data.compare_op =
+         (uint32_t)pvr_texstate_cmpmode(pCreateInfo->compareOp);
+   } else {
+      sampler->descriptor.data.compare_op =
+         (uint32_t)pvr_texstate_cmpmode(VK_COMPARE_OP_NEVER);
+   }
+
+   sampler->descriptor.data.word3 = 0;
+   pvr_csb_pack (&sampler->descriptor.data.sampler_word,
+                 TEXSTATE_SAMPLER,
+                 word) {
       const struct pvr_device_info *dev_info = &device->pdevice->dev_info;
       const float lod_clamp_max = (float)PVRX(TEXSTATE_CLAMP_MAX) /
                                   (1 << PVRX(TEXSTATE_CLAMP_FRACTIONAL_BITS));
@@ -2136,6 +2156,13 @@ VkResult pvr_CreateSampler(VkDevice _device,
          pvr_sampler_get_hw_addr_mode_from_vk(pCreateInfo->addressModeV);
       word.addrmode_w =
          pvr_sampler_get_hw_addr_mode_from_vk(pCreateInfo->addressModeW);
+
+      /* TODO: Figure out defines for these. */
+      if (word.addrmode_u == PVRX(TEXSTATE_ADDRMODE_FLIP))
+         sampler->descriptor.data.word3 |= 0x40000000;
+
+      if (word.addrmode_v == PVRX(TEXSTATE_ADDRMODE_FLIP))
+         sampler->descriptor.data.word3 |= 0x20000000;
 
       /* The Vulkan 1.0.205 spec says:
        *

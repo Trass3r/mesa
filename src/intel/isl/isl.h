@@ -42,7 +42,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "c99_compat.h"
 #include "util/compiler.h"
 #include "util/macros.h"
 #include "util/format/u_format.h"
@@ -1609,6 +1608,14 @@ struct isl_view {
     */
    uint32_t array_len;
 
+   /**
+    * Minimum LOD
+    *
+    * Similar to sampler minimum LOD, the computed LOD is clamped to be at
+    * least min_lod_clamp.
+    */
+   float min_lod_clamp;
+
    struct isl_swizzle swizzle;
 };
 
@@ -1856,6 +1863,8 @@ bool isl_format_supports_ccs_e(const struct intel_device_info *devinfo,
                                enum isl_format format);
 bool isl_format_supports_multisampling(const struct intel_device_info *devinfo,
                                        enum isl_format format);
+bool isl_format_supports_typed_atomics(const struct intel_device_info *devinfo,
+                                       enum isl_format fmt);
 
 bool isl_formats_are_ccs_e_compatible(const struct intel_device_info *devinfo,
                                       enum isl_format format1,

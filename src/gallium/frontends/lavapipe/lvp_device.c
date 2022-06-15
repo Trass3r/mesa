@@ -139,6 +139,7 @@ static const struct vk_device_extension_table lvp_device_extensions_supported = 
    .KHR_vulkan_memory_model               = true,
    .KHR_zero_initialize_workgroup_memory  = true,
    .EXT_4444_formats                      = true,
+   .EXT_border_color_swizzle              = true,
    .EXT_calibrated_timestamps             = true,
    .EXT_color_write_enable                = true,
    .EXT_conditional_rendering             = true,
@@ -258,9 +259,9 @@ lvp_physical_device_init(struct lvp_physical_device *device,
       .maxImageDimension3D                      = (1 << device->pscreen->get_param(device->pscreen, PIPE_CAP_MAX_TEXTURE_3D_LEVELS)),
       .maxImageDimensionCube                    = (1 << device->pscreen->get_param(device->pscreen, PIPE_CAP_MAX_TEXTURE_CUBE_LEVELS)),
       .maxImageArrayLayers                      = device->pscreen->get_param(device->pscreen, PIPE_CAP_MAX_TEXTURE_ARRAY_LAYERS),
-      .maxTexelBufferElements                   = device->pscreen->get_param(device->pscreen, PIPE_CAP_MAX_TEXTURE_BUFFER_SIZE),
-      .maxUniformBufferRange                    = min_shader_param(device->pscreen, PIPE_SHADER_CAP_MAX_CONST_BUFFER_SIZE),
-      .maxStorageBufferRange                    = device->pscreen->get_param(device->pscreen, PIPE_CAP_MAX_SHADER_BUFFER_SIZE),
+      .maxTexelBufferElements                   = device->pscreen->get_param(device->pscreen, PIPE_CAP_MAX_TEXEL_BUFFER_ELEMENTS_UINT),
+      .maxUniformBufferRange                    = min_shader_param(device->pscreen, PIPE_SHADER_CAP_MAX_CONST_BUFFER0_SIZE),
+      .maxStorageBufferRange                    = device->pscreen->get_param(device->pscreen, PIPE_CAP_MAX_SHADER_BUFFER_SIZE_UINT),
       .maxPushConstantsSize                     = MAX_PUSH_CONSTANTS_SIZE,
       .maxMemoryAllocationCount                 = UINT32_MAX,
       .maxSamplerAllocationCount                = 32 * 1024,
@@ -764,6 +765,13 @@ VKAPI_ATTR void VKAPI_CALL lvp_GetPhysicalDeviceFeatures2(
          features->primitivesGeneratedQuery = true;
          features->primitivesGeneratedQueryWithRasterizerDiscard = true;
          features->primitivesGeneratedQueryWithNonZeroStreams = true;
+         break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BORDER_COLOR_SWIZZLE_FEATURES_EXT: {
+         VkPhysicalDeviceBorderColorSwizzleFeaturesEXT *features =
+            (VkPhysicalDeviceBorderColorSwizzleFeaturesEXT *)ext;
+         features->borderColorSwizzle = true;
+         features->borderColorSwizzleFromImage = true;
          break;
       }
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES_EXT: {
@@ -1645,7 +1653,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_AllocateMemory(
          break;
       case VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO:
          export_info = (VkExportMemoryAllocateInfo*)ext;
-         assert(export_info->handleTypes == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT);
+         assert(!export_info->handleTypes || export_info->handleTypes == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT);
          break;
       case VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR:
          import_info = (VkImportMemoryFdInfoKHR*)ext;
@@ -1690,7 +1698,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_AllocateMemory(
          close(import_info->fd);
          goto fail;
       }
-      if (export_info) {
+      if (export_info && export_info->handleTypes) {
          mem->backed_fd = import_info->fd;
       }
       else {
@@ -1698,7 +1706,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_AllocateMemory(
       }
       mem->memory_type = LVP_DEVICE_MEMORY_TYPE_OPAQUE_FD;
    }
-   else if (export_info) {
+   else if (export_info && export_info->handleTypes) {
       mem->pmem = device->pscreen->allocate_memory_fd(device->pscreen, pAllocateInfo->allocationSize, &mem->backed_fd);
       if (!mem->pmem || mem->backed_fd < 0) {
          goto fail;

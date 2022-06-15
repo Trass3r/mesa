@@ -103,8 +103,6 @@ typedef uint32_t xcb_window_t;
 #include "vk_queue.h"
 #include "vk_object.h"
 #include "vk_sync.h"
-#include "vk_fence.h"
-#include "vk_semaphore.h"
 #include "vk_drm_syncobj.h"
 #include "vk_sync_timeline.h"
 
@@ -697,10 +695,13 @@ enum tu_dynamic_state
    TU_DYNAMIC_STATE_RB_STENCIL_CNTL,
    TU_DYNAMIC_STATE_VB_STRIDE,
    TU_DYNAMIC_STATE_RASTERIZER_DISCARD,
+   TU_DYNAMIC_STATE_BLEND,
    TU_DYNAMIC_STATE_COUNT,
    /* no associated draw state: */
    TU_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY = TU_DYNAMIC_STATE_COUNT,
    TU_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE,
+   TU_DYNAMIC_STATE_LOGIC_OP,
+   TU_DYNAMIC_STATE_COLOR_WRITE_ENABLE,
    /* re-use the line width enum as it uses GRAS_SU_CNTL: */
    TU_DYNAMIC_STATE_GRAS_SU_CNTL = VK_DYNAMIC_STATE_LINE_WIDTH,
 };
@@ -714,7 +715,6 @@ enum tu_draw_state_group_id
    TU_DRAW_STATE_VI,
    TU_DRAW_STATE_VI_BINNING,
    TU_DRAW_STATE_RAST,
-   TU_DRAW_STATE_BLEND,
    TU_DRAW_STATE_SHADER_GEOM_CONST,
    TU_DRAW_STATE_FS_CONST,
    TU_DRAW_STATE_DESC_SETS,
@@ -764,6 +764,8 @@ enum tu_cs_mode
    TU_CS_MODE_SUB_STREAM,
 };
 
+#define TU_COND_EXEC_STACK_SIZE 4
+
 struct tu_cs
 {
    uint32_t *start;
@@ -787,8 +789,9 @@ struct tu_cs
    struct tu_bo *refcount_bo;
 
    /* state for cond_exec_start/cond_exec_end */
-   uint32_t cond_flags;
-   uint32_t *cond_dwords;
+   uint32_t cond_stack_depth;
+   uint32_t cond_flags[TU_COND_EXEC_STACK_SIZE];
+   uint32_t *cond_dwords[TU_COND_EXEC_STACK_SIZE];
 };
 
 struct tu_device_memory
@@ -924,8 +927,9 @@ enum tu_cmd_dirty_bits
    TU_CMD_DIRTY_VS_PARAMS = BIT(9),
    TU_CMD_DIRTY_RASTERIZER_DISCARD = BIT(10),
    TU_CMD_DIRTY_VIEWPORTS = BIT(11),
+   TU_CMD_DIRTY_BLEND = BIT(12),
    /* all draw states were disabled and need to be re-enabled: */
-   TU_CMD_DIRTY_DRAW_STATE = BIT(12)
+   TU_CMD_DIRTY_DRAW_STATE = BIT(13)
 };
 
 /* There are only three cache domains we have to care about: the CCU, or
@@ -1162,6 +1166,13 @@ struct tu_cmd_state
 
    uint32_t gras_su_cntl, rb_depth_cntl, rb_stencil_cntl;
    uint32_t pc_raster_cntl, vpc_unknown_9107;
+   uint32_t rb_mrt_control[MAX_RTS], rb_mrt_blend_control[MAX_RTS];
+   uint32_t rb_mrt_control_rop;
+   uint32_t rb_blend_cntl, sp_blend_cntl;
+   uint32_t pipeline_color_write_enable, pipeline_blend_enable;
+   uint32_t color_write_enable;
+   bool logic_op_enabled;
+   bool rop_reads_dst;
    enum pc_di_primtype primtype;
    bool primitive_restart_enable;
 
@@ -1201,8 +1212,6 @@ struct tu_cmd_state
    VkRect2D render_area;
 
    const struct tu_image_view **attachments;
-   /* Tracks whether attachment was cleared by vkCmdClearAttachments */
-   bool *attachment_cmd_clear;
    /* Track whether conditional predicate for COND_REG_EXEC is changed in draw_cs */
    bool draw_cs_writes_to_cond_pred;
 
@@ -1222,27 +1231,24 @@ struct tu_cmd_state
     * to:
     *
     *    foreach_draw (...) {
-    *      cost += num_frag_outputs;
-    *      if (blend_enabled)
-    *        cost += num_blend_enabled;
+    *      sum += pipeline->color_bandwidth_per_sample;
     *      if (depth_test_enabled)
-    *        cost++;
+    *        sum += pipeline->depth_cpp_per_sample;
     *      if (depth_write_enabled)
-    *        cost++;
+    *        sum += pipeline->depth_cpp_per_sample;
+    *      if (stencil_write_enabled)
+    *        sum += pipeline->stencil_cpp_per_sample * 2;
     *    }
+    *    drawcall_bandwidth_per_sample = sum / drawcall_count;
     *
-    * The idea is that each sample-passed minimally does one write
-    * per MRT.  If blend is enabled, the hw will additionally do
-    * a framebuffer read per sample-passed (for each MRT with blend
-    * enabled).  If depth-test is enabled, the hw will additionally
-    * a depth buffer read.  If depth-write is enable, the hw will
-    * additionally do a depth buffer write.
+    * It allows us to estimate the total bandwidth of drawcalls later, by
+    * calculating (drawcall_bandwidth_per_sample * zpass_sample_count).
     *
     * This does ignore depth buffer traffic for samples which do not
-    * pass do to depth-test fail, and some other details.  But it is
+    * pass due to depth-test fail, and some other details.  But it is
     * just intended to be a rough estimate that is easy to calculate.
     */
-   uint32_t total_drawcalls_cost;
+   uint32_t drawcall_bandwidth_per_sample_sum;
 
    struct tu_lrz_state lrz;
 
@@ -1299,7 +1305,6 @@ struct tu_cmd_buffer
    VkResult record_result;
 
    struct tu_cs cs;
-   struct tu_cs tile_load_cs;
    struct tu_cs draw_cs;
    struct tu_cs tile_store_cs;
    struct tu_cs draw_epilogue_cs;
@@ -1365,6 +1370,7 @@ struct tu_shader
 
 struct tu_shader_key {
    unsigned multiview_mask;
+   bool force_sample_interp;
    enum ir3_wavesize_option api_wavesize, real_wavesize;
 };
 
@@ -1451,12 +1457,21 @@ struct tu_pipeline
    uint32_t vpc_unknown_9107, vpc_unknown_9107_mask;
    uint32_t stencil_wrmask;
 
+   unsigned num_rts;
+   uint32_t rb_mrt_control[MAX_RTS], rb_mrt_control_mask;
+   uint32_t rb_mrt_blend_control[MAX_RTS];
+   uint32_t sp_blend_cntl, sp_blend_cntl_mask;
+   uint32_t rb_blend_cntl, rb_blend_cntl_mask;
+   uint32_t color_write_enable, blend_enable;
+   bool logic_op_enabled, rop_reads_dst;
+   bool rasterizer_discard;
+
    bool rb_depth_cntl_disable;
 
    enum a5xx_line_mode line_mode;
 
    /* draw states for the pipeline */
-   struct tu_draw_state load_state, rast_state, blend_state;
+   struct tu_draw_state load_state, rast_state;
    struct tu_draw_state prim_order_state_sysmem, prim_order_state_gmem;
 
    /* for vertex buffers state */
@@ -1506,8 +1521,11 @@ struct tu_pipeline
 
    bool z_negative_one_to_one;
 
-   /* Base drawcall cost for sysmem vs gmem autotuner */
-   uint8_t drawcall_base_cost;
+   /* memory bandwidth cost (in bytes) for color attachments */
+   uint32_t color_bandwidth_per_sample;
+
+   uint32_t depth_cpp_per_sample;
+   uint32_t stencil_cpp_per_sample;
 
    void *executables_mem_ctx;
    /* tu_pipeline_executable */
@@ -1539,6 +1557,8 @@ void tu6_emit_msaa(struct tu_cs *cs, VkSampleCountFlagBits samples,
 void tu6_emit_window_scissor(struct tu_cs *cs, uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2);
 
 void tu6_emit_window_offset(struct tu_cs *cs, uint32_t x1, uint32_t y1);
+
+uint32_t tu6_rb_mrt_control_rop(VkLogicOp op, bool *rop_reads_dst);
 
 void tu_disable_draw_states(struct tu_cmd_buffer *cmd, struct tu_cs *cs);
 
@@ -1816,6 +1836,12 @@ struct tu_framebuffer
    /* number of VSC pipes */
    VkExtent2D pipe_count;
 
+   /* Whether binning should be used for gmem rendering using this framebuffer. */
+   bool binning;
+
+   /* Whether binning could be used for gmem rendering using this framebuffer. */
+   bool binning_possible;
+
    /* pipe register values */
    uint32_t pipe_config[MAX_VSC_PIPES];
    uint32_t pipe_sizes[MAX_VSC_PIPES];
@@ -1830,10 +1856,10 @@ tu_framebuffer_tiling_config(struct tu_framebuffer *fb,
                              const struct tu_render_pass *pass);
 
 struct tu_subpass_barrier {
-   VkPipelineStageFlags src_stage_mask;
-   VkPipelineStageFlags dst_stage_mask;
-   VkAccessFlags src_access_mask;
-   VkAccessFlags dst_access_mask;
+   VkPipelineStageFlags2 src_stage_mask;
+   VkPipelineStageFlags2 dst_stage_mask;
+   VkAccessFlags2 src_access_mask;
+   VkAccessFlags2 dst_access_mask;
    bool incoherent_ccu_color, incoherent_ccu_depth;
 };
 
@@ -1891,6 +1917,10 @@ struct tu_render_pass_attachment
    /* for D32S8 separate stencil: */
    bool load_stencil;
    bool store_stencil;
+
+   bool cond_load_allowed;
+   bool cond_store_allowed;
+
    int32_t gmem_offset_stencil;
 };
 
@@ -1902,6 +1932,11 @@ struct tu_render_pass
    uint32_t subpass_count;
    uint32_t gmem_pixels;
    uint32_t tile_align_w;
+
+   /* memory bandwidth costs (in bytes) for gmem / sysmem rendering */
+   uint32_t gmem_bandwidth_per_pixel;
+   uint32_t sysmem_bandwidth_per_pixel;
+
    struct tu_subpass_attachment *subpass_attachments;
    struct tu_render_pass_attachment *attachments;
    struct tu_subpass_barrier end_barrier;
@@ -1975,9 +2010,6 @@ tu_drm_submitqueue_new(const struct tu_device *dev,
 
 void
 tu_drm_submitqueue_close(const struct tu_device *dev, uint32_t queue_id);
-
-int
-tu_signal_syncs(struct tu_device *device, struct vk_sync *sync1, struct vk_sync *sync2);
 
 int
 tu_syncobj_to_fd(struct tu_device *device, struct vk_sync *sync);
