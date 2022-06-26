@@ -25,7 +25,7 @@ jobs:
         CCACHE_NOCOMPRESS: 1 # cache action will also compress
       run: |
         export CC='ccache clang' CXX='ccache clang++' CC_LD=lld CXX_LD=lld
-        export CFLAGS='-g -gdwarf-4' CXXFLAGS='-g -gdwarf-4'
+        export CFLAGS='-g -gdwarf-4 -DDEBUG=1' CXXFLAGS='-g -gdwarf-4 -DDEBUG=1'
         # -D buildtype=release -Db_lto=true -Db_lto_mode=thin
         meson build/ -D buildtype=debugoptimized \
           -D platforms=x11,wayland -D gallium-drivers=swrast,zink,d3d12 -D dri3=enabled -D egl=enabled -D gles2=enabled -D glvnd=true -D glx=dri -D libunwind=disabled -D shared-glapi=enabled  -D valgrind=disabled -D gles1=disabled -Dgallium-nine=true \
