@@ -422,6 +422,17 @@ dzn_graphics_pipeline_compile_shaders(struct dzn_device *device,
 
    /* Last step: translate NIR shaders into DXIL modules */
    u_foreach_bit(stage, active_stage_mask) {
+      if (stage == MESA_SHADER_FRAGMENT) {
+         gl_shader_stage prev_stage =
+            util_last_bit(active_stage_mask & BITFIELD_MASK(MESA_SHADER_FRAGMENT)) - 1;
+         /* Disable rasterization if the last geometry stage doesn't
+	  * write the position.
+	  */
+	 if (prev_stage == MESA_SHADER_NONE ||
+             !(stages[prev_stage].nir->info.outputs_written & VARYING_BIT_POS))
+            continue;
+      }
+
       D3D12_SHADER_BYTECODE *slot =
          dzn_pipeline_get_gfx_shader_slot(out, stage);
 
@@ -636,6 +647,17 @@ translate_cull_mode(VkCullModeFlags in)
    }
 }
 
+static int32_t
+translate_depth_bias(double depth_bias)
+{
+   if (depth_bias > INT32_MAX)
+      return INT32_MAX;
+   else if (depth_bias < INT32_MIN)
+      return INT32_MIN;
+
+   return depth_bias;
+}
+
 static void
 dzn_graphics_pipeline_translate_rast(struct dzn_graphics_pipeline *pipeline,
                                      D3D12_PIPELINE_STATE_STREAM_DESC *out,
@@ -669,7 +691,7 @@ dzn_graphics_pipeline_translate_rast(struct dzn_graphics_pipeline *pipeline,
    desc->FrontCounterClockwise =
       in_rast->frontFace == VK_FRONT_FACE_COUNTER_CLOCKWISE;
    if (in_rast->depthBiasEnable) {
-      desc->DepthBias = in_rast->depthBiasConstantFactor;
+      desc->DepthBias = translate_depth_bias(in_rast->depthBiasConstantFactor);
       desc->SlopeScaledDepthBias = in_rast->depthBiasSlopeFactor;
       desc->DepthBiasClamp = in_rast->depthBiasClamp;
    }
@@ -1328,7 +1350,7 @@ dzn_graphics_pipeline_get_state(struct dzn_graphics_pipeline *pipeline,
       D3D12_RASTERIZER_DESC *rast =
          dzn_graphics_pipeline_get_desc(pipeline, stream_buf, rast);
       if (rast && pipeline->zsa.dynamic_depth_bias) {
-         rast->DepthBias = masked_key.depth_bias.constant_factor;
+         rast->DepthBias = translate_depth_bias(masked_key.depth_bias.constant_factor);
          rast->DepthBiasClamp = masked_key.depth_bias.clamp;
          rast->SlopeScaledDepthBias = masked_key.depth_bias.slope_factor;
       }
@@ -1366,7 +1388,7 @@ dzn_graphics_pipeline_get_state(struct dzn_graphics_pipeline *pipeline,
 
       HRESULT hres = ID3D12Device2_CreatePipelineState(device->dev, &stream_desc,
                                                        &IID_ID3D12PipelineState,
-                                                       &variant->state);
+                                                       (void**)(&variant->state));
       assert(!FAILED(hres));
       he = _mesa_hash_table_insert(pipeline->variants, &variant->key, variant);
       assert(he);

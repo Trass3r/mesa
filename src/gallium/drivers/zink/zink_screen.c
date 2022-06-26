@@ -531,11 +531,13 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return 0;
 
    case PIPE_CAP_TEXTURE_BORDER_COLOR_QUIRK:
-      /* This is also broken on the other AMD drivers for old HW, but
-       * there's no obvious way to test for that.
+      /* assume that if drivers don't implement this extension they either:
+       * - don't support custom border colors
+       * - handle things correctly
+       * - hate border color accuracy
        */
-      if (screen->info.driver_props.driverID == VK_DRIVER_ID_MESA_RADV ||
-          screen->info.driver_props.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY)
+      if (screen->info.have_EXT_border_color_swizzle &&
+          !screen->info.border_swizzle_feats.borderColorSwizzleFromImage)
          return PIPE_QUIRK_TEXTURE_BORDER_COLOR_SWIZZLE_NV50;
       return 0;
 
@@ -554,6 +556,9 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_INDEP_BLEND_ENABLE:
    case PIPE_CAP_INDEP_BLEND_FUNC:
       return screen->info.feats.features.independentBlend;
+
+   case PIPE_CAP_DITHERING:
+      return 0;
 
    case PIPE_CAP_MAX_STREAM_OUTPUT_BUFFERS:
       return screen->info.have_EXT_transform_feedback ? screen->info.tf_props.maxTransformFeedbackBuffers : 0;
@@ -1259,8 +1264,6 @@ zink_destroy_screen(struct pipe_screen *pscreen)
 
    if (screen->sem)
       VKSCR(DestroySemaphore)(screen->dev, screen->sem, NULL);
-   if (screen->prev_sem)
-      VKSCR(DestroySemaphore)(screen->dev, screen->prev_sem, NULL);
 
    if (screen->fence)
       VKSCR(DestroyFence)(screen->dev, screen->fence, NULL);
@@ -1373,14 +1376,22 @@ update_queue_props(struct zink_screen *screen)
    VkQueueFamilyProperties *props = malloc(sizeof(*props) * num_queues);
    VKSCR(GetPhysicalDeviceQueueFamilyProperties)(screen->pdev, &num_queues, props);
 
+   bool found_gfx = false;
+   uint32_t sparse_only = UINT32_MAX;
+   screen->sparse_queue = UINT32_MAX;
    for (uint32_t i = 0; i < num_queues; i++) {
-      if (props[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+      if (!found_gfx && (props[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
          screen->gfx_queue = i;
          screen->max_queues = props[i].queueCount;
          screen->timestamp_valid_bits = props[i].timestampValidBits;
-         break;
-      }
+         found_gfx = true;
+         if (props[i].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT)
+            screen->sparse_queue = i;
+      } else if (props[i].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT)
+         sparse_only = i;
    }
+   if (screen->sparse_queue == UINT32_MAX)
+      screen->sparse_queue = sparse_only;
    free(props);
 }
 
@@ -1389,10 +1400,12 @@ init_queue(struct zink_screen *screen)
 {
    simple_mtx_init(&screen->queue_lock, mtx_plain);
    VKSCR(GetDeviceQueue)(screen->dev, screen->gfx_queue, 0, &screen->queue);
-   if (screen->threaded && screen->max_queues > 1)
-      VKSCR(GetDeviceQueue)(screen->dev, screen->gfx_queue, 1, &screen->thread_queue);
-   else
-      screen->thread_queue = screen->queue;
+   if (screen->sparse_queue != UINT32_MAX) {
+      if (screen->sparse_queue != screen->gfx_queue)
+         VKSCR(GetDeviceQueue)(screen->dev, screen->sparse_queue, 0, &screen->queue_sparse);
+      else
+         screen->queue_sparse = screen->queue;
+   }
 }
 
 static void
@@ -1741,29 +1754,16 @@ zink_screen_init_semaphore(struct zink_screen *screen)
 {
    VkSemaphoreCreateInfo sci = {0};
    VkSemaphoreTypeCreateInfo tci = {0};
-   VkSemaphore sem;
    sci.pNext = &tci;
    sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
    tci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
    tci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
 
-   if (VKSCR(CreateSemaphore)(screen->dev, &sci, NULL, &sem) == VK_SUCCESS) {
-      /* semaphore signal values can never decrease,
-       * so we need a new semaphore anytime we overflow
-       */
-      if (screen->prev_sem)
-         VKSCR(DestroySemaphore)(screen->dev, screen->prev_sem, NULL);
-      screen->prev_sem = screen->sem;
-      screen->sem = sem;
-      return true;
-   } else {
-      mesa_loge("ZINK: vkCreateSemaphore failed");
-   }
-   return false;
+   return VKSCR(CreateSemaphore)(screen->dev, &sci, NULL, &screen->sem) == VK_SUCCESS;
 }
 
 bool
-zink_screen_timeline_wait(struct zink_screen *screen, uint32_t batch_id, uint64_t timeout)
+zink_screen_timeline_wait(struct zink_screen *screen, uint64_t batch_id, uint64_t timeout)
 {
    VkSemaphoreWaitInfo wi = {0};
 
@@ -1772,10 +1772,8 @@ zink_screen_timeline_wait(struct zink_screen *screen, uint32_t batch_id, uint64_
 
    wi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
    wi.semaphoreCount = 1;
-   /* handle batch_id overflow */
-   wi.pSemaphores = batch_id > screen->curr_batch ? &screen->prev_sem : &screen->sem;
-   uint64_t batch_id64 = batch_id;
-   wi.pValues = &batch_id64;
+   wi.pSemaphores = &screen->sem;
+   wi.pValues = &batch_id;
    bool success = false;
    if (screen->device_lost)
       return true;
@@ -2087,9 +2085,12 @@ init_driver_workarounds(struct zink_screen *screen)
    if (screen->info.driver_props.driverID == VK_DRIVER_ID_AMD_PROPRIETARY)
       /* this completely breaks xfb somehow */
       screen->info.have_EXT_extended_dynamic_state2 = false;
-   /* #6602 */
-   if (screen->info.driver_props.driverID == VK_DRIVER_ID_MESA_TURNIP)
+   if (screen->info.driver_props.driverID == VK_DRIVER_ID_MESA_TURNIP) {
+      /* #6602 */
       screen->info.have_EXT_primitives_generated_query = false;
+      /* #6732 */
+      screen->info.have_EXT_depth_clip_enable = false;
+   }
 }
 
 static struct zink_screen *
@@ -2319,6 +2320,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config)
          else
             screen->heap_map[i] = screen->heap_map[ZINK_HEAP_DEVICE_LOCAL];
       }
+      screen->heap_flags[i] = screen->info.mem_props.memoryTypes[screen->heap_map[i]].propertyFlags;
    }
    {
       unsigned vis_vram = screen->heap_map[ZINK_HEAP_DEVICE_LOCAL_VISIBLE];

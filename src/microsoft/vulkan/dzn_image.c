@@ -419,6 +419,12 @@ dzn_image_get_dsv_desc(const struct dzn_image *image,
       dsv_desc.Texture2DArray.FirstArraySlice = range->baseArrayLayer;
       dsv_desc.Texture2DArray.ArraySize = layer_count;
       break;
+   case D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY:
+      dsv_desc.Texture2DMSArray.FirstArraySlice = range->baseArrayLayer;
+      dsv_desc.Texture2DMSArray.ArraySize = layer_count;
+      break;
+   default:
+      unreachable("Invalid view dimension");
    }
 
    return dsv_desc;
@@ -515,6 +521,7 @@ dzn_image_layout_to_state(VkImageLayout layout, VkImageAspectFlagBits aspect)
    case VK_IMAGE_LAYOUT_PREINITIALIZED:
    case VK_IMAGE_LAYOUT_UNDEFINED:
    case VK_IMAGE_LAYOUT_GENERAL:
+   case VK_IMAGE_LAYOUT_SUBPASS_SELF_DEPENDENCY_MESA:
       /* YOLO! */
    case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
       return D3D12_RESOURCE_STATE_COMMON;

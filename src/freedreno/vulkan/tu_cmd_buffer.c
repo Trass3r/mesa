@@ -572,6 +572,17 @@ use_hw_binning(struct tu_cmd_buffer *cmd)
       return true;
    }
 
+   /* VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT emulates GL_PRIMITIVES_GENERATED,
+    * which wasn't designed to care about tilers and expects the result not to
+    * be multiplied by tile count.
+    * See https://gitlab.khronos.org/vulkan/vulkan/-/issues/3131
+    */
+   if (cmd->state.has_prim_generated_query_in_rp ||
+       cmd->state.prim_generated_query_running_before_rp) {
+      assert(fb->binning_possible);
+      return true;
+   }
+
    return fb->binning;
 }
 
@@ -602,6 +613,14 @@ use_sysmem_rendering(struct tu_cmd_buffer *cmd,
 
    /* XFB is incompatible with non-hw binning GMEM rendering, see use_hw_binning */
    if (cmd->state.xfb_used && !cmd->state.framebuffer->binning_possible)
+      return true;
+
+   /* QUERY_TYPE_PRIMITIVES_GENERATED is incompatible with non-hw binning
+    * GMEM rendering, see use_hw_binning.
+    */
+   if ((cmd->state.has_prim_generated_query_in_rp ||
+        cmd->state.prim_generated_query_running_before_rp) &&
+       !cmd->state.framebuffer->binning_possible)
       return true;
 
    if (unlikely(cmd->device->physical_device->instance->debug_flags & TU_DEBUG_GMEM))
@@ -1140,8 +1159,12 @@ tu_emit_input_attachments(struct tu_cmd_buffer *cmd,
       if (i % 2 == 1 && att->format == VK_FORMAT_D24_UNORM_S8_UINT) {
          /* note this works because spec says fb and input attachments
           * must use identity swizzle
+          *
+          * Also we clear swap to WZYX.  This is because the view might have
+          * picked XYZW to work better with border colors.
           */
          dst[0] &= ~(A6XX_TEX_CONST_0_FMT__MASK |
+            A6XX_TEX_CONST_0_SWAP__MASK |
             A6XX_TEX_CONST_0_SWIZ_X__MASK | A6XX_TEX_CONST_0_SWIZ_Y__MASK |
             A6XX_TEX_CONST_0_SWIZ_Z__MASK | A6XX_TEX_CONST_0_SWIZ_W__MASK);
          if (!cmd->device->physical_device->info->a6xx.has_z24uint_s8uint) {
@@ -4955,9 +4978,11 @@ tu_CmdEndRenderPass2(VkCommandBuffer commandBuffer,
    cmd_buffer->state.attachments = NULL;
    cmd_buffer->state.has_tess = false;
    cmd_buffer->state.has_subpass_predication = false;
+   cmd_buffer->state.xfb_used = false;
    cmd_buffer->state.disable_gmem = false;
    cmd_buffer->state.drawcall_count = 0;
    cmd_buffer->state.drawcall_bandwidth_per_sample_sum = 0;
+   cmd_buffer->state.has_prim_generated_query_in_rp = false;
 
    /* LRZ is not valid next time we use it */
    cmd_buffer->state.lrz.valid = false;

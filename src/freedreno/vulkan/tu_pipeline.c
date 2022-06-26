@@ -2212,7 +2212,7 @@ tu6_emit_rb_mrt_controls(struct tu_pipeline *pipeline,
          if (att->blendEnable)
             pipeline->blend_enable |= BIT(i);
 
-         if (att->blendEnable || rop_reads_dst) {
+         if (att->blendEnable || *rop_reads_dst) {
             total_bpp += write_bpp;
          }
       }
@@ -2470,14 +2470,11 @@ static void
 tu_append_executable(struct tu_pipeline *pipeline, struct ir3_shader_variant *variant,
                      char *nir_from_spirv)
 {
-   ralloc_steal(pipeline->executables_mem_ctx, variant->disasm_info.nir);
-   ralloc_steal(pipeline->executables_mem_ctx, variant->disasm_info.disasm);
-
    struct tu_pipeline_executable exe = {
       .stage = variant->type,
       .nir_from_spirv = nir_from_spirv,
-      .nir_final = variant->disasm_info.nir,
-      .disasm = variant->disasm_info.disasm,
+      .nir_final = ralloc_strdup(pipeline->executables_mem_ctx, variant->disasm_info.nir),
+      .disasm = ralloc_strdup(pipeline->executables_mem_ctx, variant->disasm_info.disasm),
       .stats = variant->info,
       .is_binning = variant->binning_pass,
    };
@@ -3358,7 +3355,9 @@ tu_pipeline_builder_parse_rasterization(struct tu_pipeline_builder *builder,
 
    pipeline->line_mode = RECTANGULAR;
 
-   if (tu6_primtype_line(pipeline->ia.primtype)) {
+   if (tu6_primtype_line(pipeline->ia.primtype) ||
+       (tu6_primtype_patches(pipeline->ia.primtype) &&
+        pipeline->tess.patch_type == IR3_TESS_ISOLINES)) {
       const VkPipelineRasterizationLineStateCreateInfoEXT *rast_line_state =
          vk_find_struct_const(rast_info->pNext,
                               PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_EXT);
